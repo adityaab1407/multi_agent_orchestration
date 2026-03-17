@@ -3,6 +3,8 @@ orchestrator/checkpointer.py
 
 SQLite-backed checkpointer for LangGraph state persistence.
 
+Compatible with LangGraph >= 0.2.0 (uses langgraph-checkpoint-sqlite).
+
 This enables resume capability — if the pipeline crashes mid-run, it restarts
 from the last completed node, not from scratch.
 
@@ -16,12 +18,19 @@ WHY IT MATTERS:
     - Long research pipelines (7 agents) can take minutes.  Without
       checkpointing, any transient failure (rate-limit, network blip) means
       rerunning the entire pipeline.
-    - With checkpointing, only the failed node and its successors are re-executed.
+    - With checkpointing, only the failed node and its successors are
+      re-executed.
     - It also enables "pause / resume" workflows where a human reviewer can
       inspect intermediate state before continuing.
+
+NOTE:
+    ``SqliteSaver.from_conn_string()`` returns a context-manager in recent
+    versions of langgraph-checkpoint-sqlite, which is incompatible with the
+    ``compile(checkpointer=...)`` API (it expects a bare instance).  We
+    therefore open a raw ``sqlite3.Connection`` and pass it directly to
+    ``SqliteSaver(conn=...)``.
 """
 
-import os
 import sqlite3
 from pathlib import Path
 
