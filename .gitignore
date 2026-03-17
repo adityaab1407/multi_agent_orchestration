@@ -1,8 +1,48 @@
-.env
+# ── Python ────────────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
-.venv/
-dist/
+*.py[cod]
+*$py.class
+*.pyo
 *.egg-info/
+dist/
+build/
+*.egg
+
+# ── Virtual environments ──────────────────────────────────────────────────
+.venv/
+.multi_agent/
+venv/
+env/
+
+# ── Environment / secrets ─────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Data / runtime ────────────────────────────────────────────────────────
+data/
+*.db
+*.sqlite
+outputs/
+
+# ── IDE ───────────────────────────────────────────────────────────────────
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
+
+# ── Testing / coverage ───────────────────────────────────────────────────
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ── OS ────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Docker ────────────────────────────────────────────────────────────────
+*.log
+docker-compose.override.yml
