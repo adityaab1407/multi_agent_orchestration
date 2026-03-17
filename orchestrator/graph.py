@@ -7,7 +7,7 @@ Pipeline order:
     planner → search → scraper → analysis → visual → writer → critic
 
 planner_node calls PlannerAgent (Groq LLM) with Langfuse tracing.
-search_node is a placeholder that logs received subtasks.
+search_node calls SearchAgent (Tavily) with Langfuse tracing.
 The remaining five nodes are pass-through stubs for Phase 2.
 """
 
@@ -24,6 +24,7 @@ from langfuse import Langfuse
 from langgraph.graph import END, StateGraph
 
 from agents.planner import PlannerAgent
+from agents.search import SearchAgent
 from config.settings import (
     LANGFUSE_HOST,
     LANGFUSE_PUBLIC_KEY,
@@ -52,7 +53,7 @@ langfuse = Langfuse(
 def planner_node(state: NewsForgeState) -> dict[str, Any]:
     """Decompose the user's research topic into prioritised sub-tasks.
 
-    This is the **real implementation** — it calls ``PlannerAgent().run()``
+    This is the real implementation — it calls PlannerAgent().run()
     which invokes Groq (llama-3.3-70b-versatile) in a ReAct loop.
 
     Reads from state:
@@ -61,25 +62,18 @@ def planner_node(state: NewsForgeState) -> dict[str, Any]:
 
     Writes to state:
         - subtasks: a list of Subtask dicts produced by the LLM.
-        - pipeline_status: set to ``"planner_complete"``.
+        - pipeline_status: set to "planner_complete".
         - errors: appended to on failure.
-
-    Langfuse instrumentation:
-        - Creates a trace (via ``start_as_current_observation``) for the node.
-        - Wraps the full PlannerAgent.run() call in a nested span.
-        - Logs a ``planner_complete`` event with subtask count.
     """
     research_id: str = state["research_id"]
     topic: str = state["topic"]
 
     try:
-        # -- Outer trace for this pipeline node --
         with langfuse.start_as_current_observation(
             name="planner_node",
             metadata={"topic": topic, "research_id": research_id},
         ) as trace:
 
-            # -- Nested span covering the full ReAct loop --
             with trace.start_as_current_observation(
                 name="react_loop",
                 input={"topic": topic},
@@ -89,10 +83,13 @@ def planner_node(state: NewsForgeState) -> dict[str, Any]:
                 subtasks: list[dict[str, Any]] = agent.run(
                     topic=topic, research_id=research_id
                 )
+                # FIX: use update() then end() — Langfuse v3 API
+                span.update(output={
+                    "subtasks_generated": len(subtasks),
+                    "subtasks": subtasks,
+                })
+                span.end()
 
-                span.update(output={"subtasks_generated": len(subtasks)})
-
-            # -- Log completion event --
             trace.create_event(
                 name="planner_complete",
                 metadata={"subtask_count": len(subtasks)},
@@ -116,24 +113,87 @@ def planner_node(state: NewsForgeState) -> dict[str, Any]:
 
 
 def search_node(state: NewsForgeState) -> dict[str, Any]:
-    """Execute web searches for each sub-task produced by the Planner.
+    """Execute Tavily web searches for each sub-task produced by the Planner.
+
+    This is the real implementation — it calls SearchAgent().run()
+    which fires one Tavily search per subtask with retry logic.
 
     Reads from state:
-        - subtasks: list of Subtask dicts to generate search queries from.
+        - subtasks: list of Subtask dicts containing search_query strings.
 
     Writes to state:
-        - pipeline_status: set to ``"search_node_placeholder"``.
-        - search_results: (Day 3) accumulated SearchResult dicts from Tavily.
-
-    Current behaviour (placeholder):
-        Logs the subtask count received from planner_node.
+        - search_results: flat list of SearchResult dicts from Tavily.
+        - pipeline_status: set to "search_complete".
+        - errors: appended to on failure.
     """
-    subtasks = state.get("subtasks", [])
-    print(
-        f"[search_node] Received {len(subtasks)} subtasks from Planner. "
-        f"Real implementation in Day 3."
-    )
-    return {"pipeline_status": "search_node_placeholder"}
+    subtasks: list[dict[str, Any]] = state.get("subtasks", [])
+    print(f"[search_node] Received {len(subtasks)} subtasks")
+
+    try:
+        with langfuse.start_as_current_observation(
+            name="search_node",
+            metadata={
+                "research_id": state.get("research_id", ""),
+                "subtask_count": len(subtasks),
+            },
+        ) as trace:
+
+            agent = SearchAgent()
+            results: list[dict[str, Any]] = agent.run(subtasks)
+
+            # One span per subtask for granular observability
+            failed_subtask_ids: list[str] = []
+            for subtask in subtasks:
+                sid = subtask.get("subtask_id", "unknown")
+                subtask_results = [
+                    r for r in results if r.get("subtask_id") == sid
+                ]
+                with trace.start_as_current_observation(
+                    name=f"search_{sid}",
+                    metadata={
+                        "query": subtask.get("search_query", ""),
+                        "priority": subtask.get("priority", 0),
+                    },
+                ) as sub_span:
+                    # FIX: use update() then end() — Langfuse v3 API
+                    sub_span.update(output={"results_count": len(subtask_results)})
+                    sub_span.end()
+
+                if not subtask_results:
+                    failed_subtask_ids.append(sid)
+
+            trace.create_event(
+                name="search_complete",
+                metadata={
+                    "total_results": len(results),
+                    "failed_subtasks": failed_subtask_ids,
+                    "results_preview": [
+                        {
+                            "subtask_id": r["subtask_id"],
+                            "title": r["title"],
+                            "url": r["url"],
+                            "score": r["relevance_score"],
+                        }
+                        for r in results[:3]
+                    ],
+                },
+            )
+
+        langfuse.flush()
+
+        print(
+            f"[search_node] Done — {len(results)} results across "
+            f"{len(subtasks)} subtasks. Trace id: {trace.trace_id}"
+        )
+
+        return {
+            "search_results": results,
+            "pipeline_status": "search_complete",
+        }
+
+    except Exception as e:
+        print(f"[search_node] ERROR: {e}")
+        return {"errors": [f"search_node failed: {str(e)}"]}
 
 
 def scraper_node(state: NewsForgeState) -> dict[str, Any]:
@@ -143,7 +203,6 @@ def scraper_node(state: NewsForgeState) -> dict[str, Any]:
         - search_results: list of SearchResult dicts containing URLs to scrape.
 
     Writes to state:
-        - pipeline_status: set to ``"scraper_node running"``.
         - scraped_content: (Phase 2) list of ScrapedContent dicts.
 
     Current behaviour:
@@ -162,7 +221,6 @@ def analysis_node(state: NewsForgeState) -> dict[str, Any]:
         - search_results: original search metadata for cross-referencing.
 
     Writes to state:
-        - pipeline_status: set to ``"analysis_node running"``.
         - analysis: (Phase 2) an AnalysisOutput dict.
 
     Current behaviour:
@@ -180,7 +238,6 @@ def visual_node(state: NewsForgeState) -> dict[str, Any]:
         - analysis: AnalysisOutput dict containing themes and key facts.
 
     Writes to state:
-        - pipeline_status: set to ``"visual_node running"``.
         - visuals: (Phase 2) list of VisualOutput dicts.
 
     Current behaviour:
@@ -198,7 +255,6 @@ def writer_node(state: NewsForgeState) -> dict[str, Any]:
         - topic, analysis, visuals, critic_feedback.
 
     Writes to state:
-        - pipeline_status: set to ``"writer_node running"``.
         - draft_report: (Phase 2) Markdown string of the full report.
 
     Current behaviour:
@@ -216,7 +272,6 @@ def critic_node(state: NewsForgeState) -> dict[str, Any]:
         - draft_report, analysis.
 
     Writes to state:
-        - pipeline_status: set to ``"critic_node running"``.
         - critic_feedback: (Phase 2) CriticFeedback dict.
         - revision_count: (Phase 2) incremented on revision.
 
@@ -236,18 +291,17 @@ def build_pipeline():
     """Construct, compile, and return the full NewsForge LangGraph pipeline.
 
     The graph is a linear chain:
-
         planner → search → scraper → analysis → visual → writer → critic
 
     A SqliteSaver checkpointer is attached so that every node's output is
-    persisted to ``data/newsforge_checkpoints.db``.
+    persisted to data/newsforge_checkpoints.db.
 
     Returns:
-        A compiled LangGraph ``CompiledStateGraph`` ready to be invoked.
+        A compiled LangGraph CompiledStateGraph ready to be invoked.
     """
     graph = StateGraph(NewsForgeState)
 
-    # -- Add nodes --
+    # Add nodes
     graph.add_node("planner_node", planner_node)
     graph.add_node("search_node", search_node)
     graph.add_node("scraper_node", scraper_node)
@@ -256,7 +310,7 @@ def build_pipeline():
     graph.add_node("writer_node", writer_node)
     graph.add_node("critic_node", critic_node)
 
-    # -- Wire linear edges --
+    # Wire linear edges
     graph.add_edge("planner_node", "search_node")
     graph.add_edge("search_node", "scraper_node")
     graph.add_edge("scraper_node", "analysis_node")
@@ -264,18 +318,18 @@ def build_pipeline():
     graph.add_edge("visual_node", "writer_node")
     graph.add_edge("writer_node", "critic_node")
 
-    # -- Entry / finish --
+    # Entry / finish
     graph.set_entry_point("planner_node")
     graph.set_finish_point("critic_node")
 
-    # -- Compile with SQLite checkpointer --
+    # Compile with SQLite checkpointer
     checkpointer = get_checkpointer()
     compiled = graph.compile(checkpointer=checkpointer)
 
     return compiled
 
 
-# Module-level compiled pipeline (importable as `from orchestrator.graph import pipeline`)
+# Module-level compiled pipeline
 pipeline = build_pipeline()
 
 
@@ -315,12 +369,35 @@ if __name__ == "__main__":
     print(f"\n▶  Topic: {initial_state['topic']}")
     print(f"▶  Thread: {config['configurable']['thread_id']}\n")
 
+    # FIX: capture result (was final_state — undefined variable)
     result = pipeline.invoke(initial_state, config=config)
 
     print(f"\n{'=' * 60}")
     print(f"✔  Pipeline finished.")
-    print(f"   pipeline_status : {result['pipeline_status']}")
-    print(f"   subtasks        : {len(result.get('subtasks', []))}")
-    print(f"   errors          : {result['errors']}")
+    print(f"   pipeline_status  : {result['pipeline_status']}")
+    print(f"   subtasks         : {len(result.get('subtasks', []))}")
+    print(f"   search_results   : {len(result.get('search_results', []))}")
+    print(f"   errors           : {result['errors']}")
     print(f"{'=' * 60}")
     print(f"\n📊 Check Langfuse dashboard for traces → {LANGFUSE_HOST}")
+
+    # Print actual subtasks
+    print("\n📋 SUBTASKS GENERATED:")
+    print("-" * 60)
+    for subtask in result["subtasks"]:
+        print(f"  [{subtask['subtask_id']}] {subtask['title']}")
+        print(f"  Query    : {subtask['search_query']}")
+        print(f"  Priority : {subtask['priority']}")
+        print(f"  Reasoning: {subtask['reasoning']}")
+        print()
+
+    # Print actual search results
+    print("\n🔍 SEARCH RESULTS:")
+    print("-" * 60)
+    for r in result["search_results"]:
+        print(f"  [{r['result_id']}] linked to {r['subtask_id']}")
+        print(f"  Title    : {r['title']}")
+        print(f"  URL      : {r['url']}")
+        print(f"  Score    : {r['relevance_score']:.2f}")
+        print(f"  Snippet  : {r['snippet'][:120]}...")
+        print()
