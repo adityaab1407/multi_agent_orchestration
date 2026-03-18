@@ -23,7 +23,9 @@ from typing import Any
 from langfuse import Langfuse
 from langgraph.graph import END, StateGraph
 
+from agents.analysis import AnalysisAgent
 from agents.planner import PlannerAgent
+from agents.scraper import ScraperAgent
 from agents.search import SearchAgent
 from config.settings import (
     LANGFUSE_HOST,
@@ -203,32 +205,143 @@ def scraper_node(state: NewsForgeState) -> dict[str, Any]:
         - search_results: list of SearchResult dicts containing URLs to scrape.
 
     Writes to state:
-        - scraped_content: (Phase 2) list of ScrapedContent dicts.
-
-    Current behaviour:
-        Pass-through stub — returns state unchanged.
+        - scraped_content: list of ScrapedContent dicts.
+        - pipeline_status: set to "scraper_complete".
+        - errors: appended to on failure.
     """
-    # Phase 2 — not yet implemented
-    print("[scraper_node] STUB — pass-through, no scraping yet")
-    return {"pipeline_status": "scraper_node running"}
+    search_results: list[dict[str, Any]] = state.get("search_results", [])
+    print(f"[scraper_node] Received {len(search_results)} search results to scrape")
+
+    try:
+        with langfuse.start_as_current_observation(
+            name="scraper_node",
+            metadata={
+                "research_id": state.get("research_id", ""),
+                "result_count": len(search_results),
+            },
+        ) as trace:
+
+            agent = ScraperAgent()
+            scraped: list[dict[str, Any]] = agent.run(search_results)
+
+            # One span per scraped item for granular observability
+            for item in scraped:
+                with trace.start_as_current_observation(
+                    name=f"scrape_{item['result_id']}",
+                    metadata={"url": item["url"]},
+                ) as span:
+                    span.update(output={
+                        "status": item["scrape_status"],
+                        "method": item["scrape_method"],
+                        "word_count": item["word_count"],
+                    })
+                    span.end()
+
+            success_count = sum(1 for s in scraped if s["scrape_status"] == "success")
+            trace.create_event(
+                name="scraper_complete",
+                metadata={
+                    "total_scraped": len(scraped),
+                    "success_count": success_count,
+                    "failed_count": len(scraped) - success_count,
+                },
+            )
+
+        langfuse.flush()
+
+        print(
+            f"[scraper_node] Done — {len(scraped)} pages scraped "
+            f"({success_count} success). Trace id: {trace.trace_id}"
+        )
+
+        return {
+            "scraped_content": scraped,
+            "pipeline_status": "scraper_complete",
+        }
+
+    except Exception as e:
+        print(f"[scraper_node] ERROR: {e}")
+        return {"errors": [f"scraper_node failed: {str(e)}"]}
 
 
 def analysis_node(state: NewsForgeState) -> dict[str, Any]:
-    """Run sentiment analysis, topic clustering, and fact extraction.
+    """Extract themes, key facts, and contradictions from scraped content.
 
     Reads from state:
-        - scraped_content: cleaned text chunks from the Scraper.
-        - search_results: original search metadata for cross-referencing.
+        - scraped_content: list of ScrapedContent dicts from the Scraper.
+        - subtasks: original Planner subtasks for research-topic context.
 
     Writes to state:
-        - analysis: (Phase 2) an AnalysisOutput dict.
-
-    Current behaviour:
-        Pass-through stub — returns state unchanged.
+        - analysis: AnalysisOutput dict with themes, key_facts, contradictions,
+            confidence_score, coverage_notes, and iteration.
+        - pipeline_status: set to "analysis_complete".
+        - errors: appended to on failure.
     """
-    # Phase 2 — not yet implemented
-    print("[analysis_node] STUB — pass-through, no analysis yet")
-    return {"pipeline_status": "analysis_node running"}
+    scraped_content: list[dict[str, Any]] = state.get("scraped_content", [])
+    subtasks: list[dict[str, Any]] = state.get("subtasks", [])
+    print(
+        f"[analysis_node] Received {len(scraped_content)} scraped items, "
+        f"{len(subtasks)} subtasks"
+    )
+
+    try:
+        with langfuse.start_as_current_observation(
+            name="analysis_node",
+            metadata={
+                "research_id": state.get("research_id", ""),
+                "scraped_count": len(scraped_content),
+                "subtask_count": len(subtasks),
+            },
+        ) as trace:
+
+            with trace.start_as_current_observation(
+                name="react_loop",
+                input={
+                    "scraped_count": len(scraped_content),
+                    "topic": state.get("topic", ""),
+                },
+            ) as span:
+                agent = AnalysisAgent()
+                analysis: dict[str, Any] = agent.run(
+                    scraped_content=scraped_content,
+                    subtasks=subtasks,
+                )
+                span.update(output={
+                    "themes_count": len(analysis.get("themes", [])),
+                    "facts_count": len(analysis.get("key_facts", [])),
+                    "contradictions_count": len(analysis.get("contradictions", [])),
+                    "confidence_score": analysis.get("confidence_score", 0.0),
+                    "iteration": analysis.get("iteration", 1),
+                })
+                span.end()
+
+            trace.create_event(
+                name="analysis_complete",
+                metadata={
+                    "confidence_score": analysis.get("confidence_score", 0.0),
+                    "themes_count": len(analysis.get("themes", [])),
+                    "facts_count": len(analysis.get("key_facts", [])),
+                },
+            )
+
+        langfuse.flush()
+
+        print(
+            f"[analysis_node] Done — "
+            f"{len(analysis.get('themes', []))} themes, "
+            f"{len(analysis.get('key_facts', []))} facts, "
+            f"confidence: {analysis.get('confidence_score', 0.0):.2f}. "
+            f"Trace id: {trace.trace_id}"
+        )
+
+        return {
+            "analysis": analysis,
+            "pipeline_status": "analysis_complete",
+        }
+
+    except Exception as e:
+        print(f"[analysis_node] ERROR: {e}")
+        return {"errors": [f"analysis_node failed: {str(e)}"]}
 
 
 def visual_node(state: NewsForgeState) -> dict[str, Any]:

@@ -8,9 +8,22 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install deps first (better layer caching)
+# Install system deps needed by Playwright Chromium and lxml
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libxml2-dev \
+    libxslt-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python deps first (better layer caching)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Install Playwright + Chromium — || true means build continues if this
+# fails (e.g. on a slim image missing system libs).
+RUN pip install playwright || true
+RUN playwright install chromium || true
+RUN playwright install-deps chromium || true
 
 # Copy project
 COPY . .

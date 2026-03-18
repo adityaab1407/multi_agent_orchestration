@@ -21,13 +21,20 @@ uvicorn[standard]>=0.32.0
 streamlit>=1.40.0
 requests>=2.32.0
 
-# ── Phase 2: Planned Dependencies (uncomment when needed) ────────────────
-# beautifulsoup4>=4.12.0      # Scraper Agent
-# playwright>=1.48.0          # Scraper Agent (JS rendering)
+# ── Phase 2: Active Dependencies ─────────────────────────────────────────
+httpx>=0.27.0               # Scraper Agent — HTTP client
+beautifulsoup4>=4.12.0      # Scraper Agent — HTML parsing
+lxml>=5.2.0                 # Scraper Agent — faster HTML parser (BS4 backend)
+pytest>=8.3.0               # Testing
+pytest-cov>=6.0.0           # Coverage reports
+
+# Playwright is optional — JS-heavy page rendering.
+# Uncomment and run: playwright install chromium
+# playwright>=1.44.0
+
+# ── Phase 3+: Planned Dependencies (uncomment when needed) ───────────────
 # matplotlib>=3.9.0           # Visual Agent
 # plotly>=5.24.0              # Visual Agent
 # sentence-transformers>=3.3  # Embedding for RAG
 # qdrant-client>=1.12.0       # Vector store
 # ruff>=0.8.0                 # Linting
-# pytest>=8.3.0               # Testing
-# httpx>=0.28.0               # Async test client

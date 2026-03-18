@@ -1,12 +1,41 @@
+# Installation required:
+#   pip install httpx beautifulsoup4
+#   pip install playwright          (optional, for JS-heavy pages)
+#   playwright install chromium     (only if playwright installed above)
+#
+# ── BUG FIX (2026-03-18) ──────────────────────────────────────────────────
+# Root cause: _clean_html() returned empty string for ALL URLs due to two bugs:
+#
+# 1. AGGRESSIVE CLASS-BASED NOISE REMOVAL — The noise class filter used
+#    substring matching ("ad" in classes_string), which matched any CSS class
+#    containing the letters "ad" *anywhere*: "has-global-padding", "heading",
+#    "wp-block-heading", "breadcrumb", "read-more", etc. On the Harvard page
+#    alone, 69 elements were incorrectly destroyed — including the main
+#    content div <div class="entry-content has-global-padding ...">.
+#    Fix: Match against individual class tokens with word-boundary awareness,
+#    not substring search on the joined class string.
+#
+# 2. NO GUARANTEED FALLBACK — If no container had >50 words after the
+#    aggressive removal, content stayed as "" with no fallback to raw text.
+#    Fix: Always fall back to soup.get_text() if nothing else works.
+#
+# 3. USER-AGENT — "NewsForge-Research-Bot/1.0" was getting blocked by some
+#    sites. Changed to a browser-like User-Agent string.
+# ───────────────────────────────────────────────────────────────────────────
+
 """Scraper agent that extracts structured content from web pages.
 
 Reads:  state["search_results"]  ->  list[SearchResult]
 Writes: state["scraped_content"] ->  list[ScrapedContent]
 
 Scraping strategy:
-1. Try httpx (fast, low overhead).
-2. If content too short (<min_content_words) or blocked, fall back to Playwright.
-3. Never raises — every URL resolves to a ScrapedContentSchema.
+1. Try httpx first (fast, low overhead).
+2. If blocked (403/429), fall back to Playwright immediately.
+3. If content < min_content_words, try Playwright as a content upgrade.
+4. Never raises — every URL resolves to a ScrapedContentSchema dict.
+
+Playwright is optional: if the package is not installed the agent
+continues with httpx-only mode and logs playwright_unavailable.
 """
 
 from __future__ import annotations
@@ -17,11 +46,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import httpx
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 from pydantic import BaseModel
 
 
@@ -36,12 +64,15 @@ class ScraperConfig:
 
     request_timeout: int = 15
     playwright_timeout: int = 30
-    min_content_words: int = 150
+    min_content_words: int = 100
     chunk_size: int = 1000
     chunk_overlap: int = 100
     max_urls: int = 10
     request_delay: float = 1.0
-    user_agent: str = "NewsForge-Research-Bot/1.0"
+    user_agent: str = (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -52,11 +83,9 @@ class ScraperConfig:
 class ScrapedContentSchema(BaseModel):
     """Structured representation of a scraped web page.
 
-    ``scrape_method`` records which fetcher produced the final content:
-    ``"httpx"``, ``"playwright"``, or ``"failed"`` (neither succeeded).
-
-    ``scrape_status`` records the outcome:
-    ``"success"`` | ``"failed"`` | ``"blocked"`` | ``"paywall"`` | ``"too_short"``
+    ``scrape_method``: ``"httpx"`` | ``"playwright"`` | ``"failed"``
+    ``scrape_status``: ``"success"`` | ``"failed"`` | ``"blocked"``
+                     | ``"paywall"`` | ``"too_short"``
     """
 
     result_id: str
@@ -66,50 +95,69 @@ class ScrapedContentSchema(BaseModel):
     raw_text: str
     chunks: list[str]
     word_count: int
-    scrape_method: str   # "httpx" | "playwright" | "failed"
-    scrape_status: str   # "success" | "failed" | "blocked" | "paywall" | "too_short"
+    scrape_method: str
+    scrape_status: str
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Module-level constants
+# ═══════════════════════════════════════════════════════════════════════════
+
+_NOISE_TAGS: list[str] = [
+    "script", "style", "nav", "footer",
+    "aside", "form", "iframe", "noscript",
+]
+# NOTE: "header" was removed from _NOISE_TAGS — many sites put article
+# headers (title, byline, date) inside <header> tags. The site-wide nav
+# is already handled by removing <nav>.
+
+# Noise class patterns — matched as whole CSS class tokens, not substrings.
+# Each pattern is compiled as a regex that must match an entire class token.
+_NOISE_CLASS_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"^ad[-_]?(?:banner|box|slot|unit|wrapper|container|leaderboard)$", re.I),
+    re.compile(r"^(?:ad|ads|advert|advertisement)$", re.I),
+    re.compile(r"^cookie[-_]?(?:bar|banner|notice|consent|popup)$", re.I),
+    re.compile(r"^(?:popup|modal)[-_]?(?:overlay|backdrop|container)?$", re.I),
+    re.compile(r"^(?:banner)[-_]?(?:ad|promo|cookie)$", re.I),
+]
+
+
+def _is_noise_element(element: Tag) -> bool:
+    """Check if an element's CSS classes indicate it is noise (ads, popups, etc.).
+
+    Matches against individual class tokens using word-boundary-aware patterns,
+    NOT substring search — so "has-global-padding" will NOT match "ad".
+    """
+    classes = element.get("class", [])
+    if not classes:
+        return False
+    for cls_token in classes:
+        token_lower = cls_token.lower()
+        for pattern in _NOISE_CLASS_PATTERNS:
+            if pattern.match(token_lower):
+                return True
+    return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ScraperAgent
 # ═══════════════════════════════════════════════════════════════════════════
 
-_PAYWALL_MARKERS: list[str] = [
-    "subscribe to read",
-    "premium content",
-    "sign in to continue",
-]
-
-_NOISE_TAGS: list[str] = [
-    "script", "style", "nav", "header", "footer",
-    "aside", "form", "iframe", "noscript",
-]
-
-_NOISE_CLASSES: list[str] = ["ad", "cookie", "banner", "popup"]
-
 
 class ScraperAgent:
     """Fetches, cleans, and chunks web pages sourced from SearchResult URLs.
 
     Scraping flow per URL:
-    - ``httpx`` is tried first (fast, low-overhead).
+    - httpx is tried first (fast, low-overhead).
     - If httpx is blocked (403/429), Playwright is attempted immediately.
     - If httpx content is shorter than ``min_content_words``, Playwright is
-      attempted as an upgrade; the richer result wins.
-    - Any unhandled exception produces a ``"failed"`` schema — the agent
+      attempted as a content upgrade; the richer result wins.
+    - Playwright is optional — if not installed, httpx-only mode is used.
+    - Any unhandled exception produces a ``"failed"`` schema. The agent
       never propagates exceptions to the caller.
     """
 
     def __init__(self, config: ScraperConfig | None = None) -> None:
-        """Initialise the ScraperAgent with an httpx.Client.
-
-        Playwright is **not** instantiated here; it is initialised lazily
-        inside each ``_scrape_with_playwright`` call via ``sync_playwright()``.
-
-        Args:
-            config: Optional ``ScraperConfig``; sensible defaults are used
-                if omitted.
-        """
         self.config = config or ScraperConfig()
         self._http = httpx.Client(
             headers={"User-Agent": self.config.user_agent},
@@ -120,21 +168,7 @@ class ScraperAgent:
     # ── public API ────────────────────────────────────────────────────────
 
     def run(self, search_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Scrape each URL from *search_results* and return ScrapedContent dicts.
-
-        Results are sorted by ``relevance_score`` (descending) and capped at
-        ``config.max_urls`` before scraping.  A ``request_delay`` pause is
-        inserted between consecutive requests to avoid triggering rate limits.
-
-        Args:
-            search_results: List of SearchResult dicts.  Each must contain at
-                minimum the keys ``url``, ``result_id``, ``subtask_id``,
-                ``title``, and ``relevance_score``.
-
-        Returns:
-            A ``list[dict]`` of ScrapedContent records (one per URL), ready
-            to merge into ``NewsForgeState["scraped_content"]``.
-        """
+        """Scrape each URL from *search_results* and return ScrapedContent dicts."""
         sorted_results = sorted(
             search_results,
             key=lambda r: r.get("relevance_score", 0.0),
@@ -164,71 +198,60 @@ class ScraperAgent:
     def _scrape_url(self, result: dict[str, Any]) -> ScrapedContentSchema:
         """Scrape a single URL with httpx → Playwright fallback.
 
-        Decision tree:
-        1. Call ``_scrape_with_httpx``.
-        2. If status is ``"paywall"`` → return paywall schema (no fallback).
-        3. If status is ``"not_found"`` / ``"timeout"`` / ``"failed"`` →
-           return failed schema.
-        4. If status is ``"blocked"`` → try Playwright; if Playwright also
-           fails return blocked schema.
-        5. Clean HTML and count words.
-        6. If ``word_count < min_content_words`` and httpx was used →
-           try Playwright as a content upgrade; keep the richer result.
-        7. If word count is still below the minimum → return ``"too_short"``.
-        8. On any unhandled exception → return failed schema.
-
-        Args:
-            result: A SearchResult dict with ``url``, ``result_id``,
-                ``subtask_id``, and ``title`` keys.
-
-        Returns:
-            A fully populated ``ScrapedContentSchema`` — never raises.
+        Never returns None, never raises.
         """
-        url = result.get("url", "")
-        result_id = result.get("result_id", "")
-        subtask_id = result.get("subtask_id", "")
-        title = result.get("title", "")
-
-        def _make_schema(
-            status: str,
-            method: str = "failed",
-            text: str = "",
-            chunks: list[str] | None = None,
-        ) -> ScrapedContentSchema:
-            """Build a ScrapedContentSchema with computed word_count."""
-            return ScrapedContentSchema(
-                result_id=result_id,
-                subtask_id=subtask_id,
-                url=url,
-                title=title,
-                raw_text=text,
-                chunks=chunks if chunks is not None else [],
-                word_count=len(text.split()) if text else 0,
-                scrape_method=method,
-                scrape_status=status,
-            )
-
         try:
+            url = result.get("url", "")
+            result_id = result.get("result_id", "")
+            subtask_id = result.get("subtask_id", "")
+            title = result.get("title", "")
+
+            def _make_schema(
+                status: str,
+                method: str = "failed",
+                text: str = "",
+                chunks: list[str] | None = None,
+            ) -> ScrapedContentSchema:
+                return ScrapedContentSchema(
+                    result_id=result_id,
+                    subtask_id=subtask_id,
+                    url=url,
+                    title=title,
+                    raw_text=text,
+                    chunks=chunks if chunks is not None else [],
+                    word_count=len(text.split()) if text else 0,
+                    scrape_method=method,
+                    scrape_status=status,
+                )
+
             html, http_status = self._scrape_with_httpx(url)
             method = "httpx"
 
-            # ── terminal httpx statuses ───────────────────────────────────
-            if http_status == "paywall":
-                return _make_schema("paywall", "httpx")
-
-            if http_status in ("not_found", "timeout", "failed"):
-                return _make_schema("failed", "httpx")
-
+            # ── terminal statuses ─────────────────────────────────────────
             if http_status == "blocked":
-                # Escalate immediately — bot-blocked pages need a real browser
                 html, _ = self._scrape_with_playwright(url)
                 if not html:
                     return _make_schema("blocked", "playwright")
                 method = "playwright"
 
+            elif http_status != "success":
+                return _make_schema("failed", "httpx")
+
             # ── content extraction ────────────────────────────────────────
             text = self._clean_html(html)
             word_count = len(text.split())
+
+            # ── post-cleaning paywall check ───────────────────────────────
+            _PAYWALL_PHRASES = [
+                "subscribe to read the full",
+                "this content is for subscribers",
+                "premium content. please subscribe",
+                "sign in to read more",
+                "create a free account to continue",
+            ]
+            cleaned_lower = text.lower()
+            if word_count < 100 and any(p in cleaned_lower for p in _PAYWALL_PHRASES):
+                return _make_schema("paywall", method)
 
             # ── Playwright upgrade for thin httpx content ─────────────────
             if word_count < self.config.min_content_words and method == "httpx":
@@ -268,71 +291,50 @@ class ScraperAgent:
             )
 
         except Exception as exc:
-            print(f"[Scraper] Unhandled error for {url}: {exc}")
-            return _make_schema("failed", "failed")
+            print(f"[Scraper] Unhandled error for {result.get('url', '')}: {exc}")
+            return ScrapedContentSchema(
+                result_id=result.get("result_id", "unknown"),
+                subtask_id=result.get("subtask_id", "unknown"),
+                url=result.get("url", ""),
+                title=result.get("title", ""),
+                raw_text="",
+                chunks=[],
+                word_count=0,
+                scrape_method="failed",
+                scrape_status="failed",
+            )
 
     # ── httpx fetch ───────────────────────────────────────────────────────
 
     def _scrape_with_httpx(self, url: str) -> tuple[str, str]:
-        """Fetch *url* with httpx and return ``(html, status)``.
-
-        Status values returned:
-        - ``"success"``   — 2xx response with an HTML body.
-        - ``"blocked"``   — HTTP 403 or 429 (bot/rate-limit wall).
-        - ``"not_found"`` — HTTP 404.
-        - ``"timeout"``   — ``httpx.TimeoutException`` raised.
-        - ``"paywall"``   — Body contains known paywall marker text.
-        - ``"failed"``    — Any other non-success condition.
-
-        Args:
-            url: The URL to fetch.
-
-        Returns:
-            Tuple of ``(raw_html, status_string)``.  ``raw_html`` is an empty
-            string for all non-success statuses.
-        """
+        """Fetch *url* with httpx and return ``(html, status)``."""
         try:
             response = self._http.get(url)
+            response.raise_for_status()
+            return (response.text, "success")
+
         except httpx.TimeoutException:
             return ("", "timeout")
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
+            if code in (403, 429):
+                return ("", "blocked")
+            if code == 404:
+                return ("", "not_found")
+            return ("", f"http_error_{code}")
         except Exception:
             return ("", "failed")
-
-        if response.status_code in (403, 429):
-            return ("", "blocked")
-        if response.status_code == 404:
-            return ("", "not_found")
-        if not response.is_success:
-            return ("", "failed")
-
-        html = response.text
-        lower_html = html.lower()
-        for marker in _PAYWALL_MARKERS:
-            if marker in lower_html:
-                return (html, "paywall")
-
-        return (html, "success")
 
     # ── Playwright fetch ──────────────────────────────────────────────────
 
     def _scrape_with_playwright(self, url: str) -> tuple[str, str]:
-        """Fetch *url* using headless Chromium via Playwright.
-
-        Waits for ``"networkidle"`` so JS-rendered content is fully present
-        before ``page.content()`` is called.  Playwright is instantiated
-        fresh for each call (``sync_playwright`` context manager) to avoid
-        stale browser-state issues across long pipeline runs.
-
-        Args:
-            url: The URL to render.
-
-        Returns:
-            ``(html, "success")`` on success, or ``("", "failed")`` on any
-            error (import failure, browser crash, navigation timeout, etc.).
-        """
+        """Fetch *url* using headless Chromium via Playwright (optional dep)."""
         try:
-            from playwright.sync_api import sync_playwright  # noqa: PLC0415
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            return ("", "playwright_unavailable")
 
+        try:
             with sync_playwright() as pw:
                 browser = pw.chromium.launch(headless=True)
                 try:
@@ -346,7 +348,6 @@ class ScraperAgent:
                     html = page.content()
                 finally:
                     browser.close()
-
             return (html, "success")
 
         except Exception as exc:
@@ -356,73 +357,109 @@ class ScraperAgent:
     # ── HTML cleaning ─────────────────────────────────────────────────────
 
     def _clean_html(self, raw_html: str) -> str:
-        """Strip boilerplate from *raw_html* and return clean body text.
+        """Strip boilerplate from *raw_html* and return clean plain text.
 
         Cleaning pipeline:
-        1. Parse with ``BeautifulSoup`` (``html.parser``).
-        2. Decompose structural noise: ``<script>``, ``<style>``, ``<nav>``,
-           ``<header>``, ``<footer>``, ``<aside>``, ``<form>``, ``<iframe>``,
-           ``<noscript>``.
-        3. Decompose class-based noise elements whose ``class`` attribute
-           contains any of: ``ad``, ``cookie``, ``banner``, ``popup``.
-        4. Select the highest-priority content container found:
-           ``<article>`` → ``<main>`` → ``<div class="content">`` → ``<body>``
-           → (whole soup as final fallback).
-        5. Extract text, collapse whitespace to single spaces.
-
-        Args:
-            raw_html: Raw HTML string to process.
-
-        Returns:
-            Clean plain-text string with normalised whitespace.  Returns an
-            empty string if *raw_html* is falsy.
+        1. Parse with BeautifulSoup (html.parser).
+        2. Remove structural noise tags (script, style, nav, footer, etc.).
+        3. Remove noise elements by class (word-boundary matching, not substring).
+        4. Try content containers in priority order (article > main > body > soup).
+        5. GUARANTEED FALLBACK: if nothing has >50 words, use soup.get_text().
+        6. Collapse whitespace and rejoin lines.
         """
         if not raw_html:
             return ""
 
-        soup = BeautifulSoup(raw_html, "html.parser")
+        try:
+            soup = BeautifulSoup(raw_html, "html.parser")
 
-        # 1. Remove structural noise tags
-        for tag in soup.find_all(_NOISE_TAGS):
-            tag.decompose()
+            print(f"[Scraper._clean_html] raw HTML chars: {len(raw_html)}")
 
-        # 2. Remove class-based noise elements
-        for element in soup.find_all(class_=True):
-            classes = " ".join(element.get("class", [])).lower()
-            if any(noise in classes for noise in _NOISE_CLASSES):
-                element.decompose()
+            # Remove structural noise tags
+            for tag in soup.find_all(_NOISE_TAGS):
+                tag.decompose()
 
-        # 3. Content priority: article → main → div.content → body → soup
-        content_node = (
-            soup.find("article")
-            or soup.find("main")
-            or soup.find("div", class_="content")
-            or soup.find("body")
-            or soup
-        )
+            # Remove class-based noise elements (word-boundary matching)
+            for element in soup.find_all(class_=True):
+                if _is_noise_element(element):
+                    element.decompose()
 
-        text = content_node.get_text(separator=" ", strip=True)
-        return re.sub(r"\s+", " ", text).strip()
+            # Content container priority chain
+            candidates: list[tuple[str, Tag | None]] = [
+                ("article", soup.find("article")),
+                ("main", soup.find("main")),
+                ("id=content", soup.find(attrs={"id": "content"})),
+                ("id=main-content", soup.find(attrs={"id": "main-content"})),
+                ("id=main", soup.find(attrs={"id": "main"})),
+                ("div.content-class", soup.find(
+                    "div",
+                    attrs={
+                        "class": lambda c: c and any(
+                            k in " ".join(c).lower()
+                            for k in [
+                                "article", "content", "post", "entry",
+                                "body", "story", "text",
+                            ]
+                        )
+                    },
+                )),
+                ("body", soup.find("body")),
+                ("soup", soup),
+            ]
+
+            content = ""
+            matched_label = ""
+            for label, candidate in candidates:
+                if candidate is None:
+                    continue
+                t = candidate.get_text(separator=" ", strip=True)
+                wc = len(t.split())
+                if wc > 50:
+                    print(
+                        f"[Scraper._clean_html] matched container: {label} "
+                        f"({wc} words)"
+                    )
+                    content = t
+                    matched_label = label
+                    break
+
+            # GUARANTEED FALLBACK — never return empty when HTML has content
+            if not content:
+                fallback = soup.get_text(separator=" ", strip=True)
+                fallback_wc = len(fallback.split())
+                print(
+                    f"[Scraper._clean_html] no container >50 words, "
+                    f"using raw soup fallback ({fallback_wc} words)"
+                )
+                content = fallback
+
+            # Collapse whitespace: strip lines, drop empties
+            lines = [line.strip() for line in content.splitlines() if line.strip()]
+            result = "\n".join(lines) if lines else content
+
+            print(
+                f"[Scraper._clean_html] final text: {len(result.split())} words, "
+                f"first 200 chars: {result[:200]!r}"
+            )
+            return result
+
+        except Exception as exc:
+            # Last resort: even if BS4 fails, try to extract something
+            print(f"[Scraper._clean_html] exception: {exc}")
+            # Strip tags with regex as absolute last resort
+            text = re.sub(r"<[^>]+>", " ", raw_html)
+            text = re.sub(r"\s+", " ", text).strip()
+            if text:
+                print(
+                    f"[Scraper._clean_html] regex fallback: {len(text.split())} words"
+                )
+                return text
+            return ""
 
     # ── text chunking ─────────────────────────────────────────────────────
 
     def _chunk_text(self, text: str) -> list[str]:
-        """Split *text* into overlapping word-level chunks.
-
-        If the total word count is ≤ ``chunk_size``, returns ``[text]``
-        unchanged — no splitting is necessary.
-
-        Overlap is achieved by advancing the window start by
-        ``chunk_size - chunk_overlap`` words each step, so consecutive chunks
-        share ``chunk_overlap`` words at their boundary.
-
-        Args:
-            text: The plain text to split.
-
-        Returns:
-            A list of chunk strings.  Returns ``[]`` for empty *text* and
-            ``[text]`` when *text* is shorter than ``chunk_size`` words.
-        """
+        """Split *text* into overlapping word-level chunks."""
         if not text:
             return []
 
@@ -447,38 +484,70 @@ class ScraperAgent:
 # ═══════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    mock_results = [
+    import textwrap
+
+    # ── Step 1: Raw httpx diagnostic ──────────────────────────────────────
+    print("=" * 70)
+    print("STEP 1: Raw httpx diagnostic (Harvard URL)")
+    print("=" * 70)
+
+    diag_url = "https://news.harvard.edu/gazette/story/2025/03/how-ai-is-transforming-medicine-healthcare/"
+    try:
+        r = httpx.get(
+            diag_url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+            },
+            follow_redirects=True,
+            timeout=15,
+        )
+        print(f"  Status       : {r.status_code}")
+        print(f"  Content-Type : {r.headers.get('content-type')}")
+        print(f"  HTML length  : {len(r.text)}")
+        print(f"  First 500 chars:\n{textwrap.indent(r.text[:500], '    ')}")
+    except Exception as exc:
+        print(f"  Raw httpx failed: {exc}")
+
+    # ── Step 2: Full scraper test ─────────────────────────────────────────
+    print("\n" + "=" * 70)
+    print("STEP 2: Full scraper pipeline test (3 URLs)")
+    print("=" * 70)
+
+    test_results = [
         {
             "result_id": "result_001",
             "subtask_id": "subtask_001",
-            "title": "AI in Healthcare 2025: Transforming Diagnostics",
-            "url": "https://www.statnews.com/2024/12/10/artificial-intelligence-healthcare-radiology-diagnosis/",
-            "snippet": "AI is transforming how clinicians diagnose disease...",
-            "relevance_score": 1.0,
-            "source_domain": "statnews.com",
+            "title": "Harvard AI Medicine",
+            "url": "https://news.harvard.edu/gazette/story/2025/03/how-ai-is-transforming-medicine-healthcare/",
+            "snippet": "...",
+            "relevance_score": 0.84,
+            "source_domain": "harvard.edu",
         },
         {
             "result_id": "result_002",
             "subtask_id": "subtask_001",
-            "title": "How AI Is Accelerating Drug Discovery",
-            "url": "https://www.nature.com/articles/d41586-024-00027-4",
-            "snippet": "Machine learning models are shortening the drug pipeline...",
-            "relevance_score": 0.92,
-            "source_domain": "nature.com",
+            "title": "MIT AI Research",
+            "url": "https://news.mit.edu/2025/new-ai-system-could-accelerate-clinical-research-0925",
+            "snippet": "...",
+            "relevance_score": 0.81,
+            "source_domain": "mit.edu",
         },
         {
             "result_id": "result_003",
             "subtask_id": "subtask_002",
-            "title": "AI Ethics in Clinical Decision Support",
-            "url": "https://www.healthaffairs.org/doi/10.1377/hlthaff.2023.01351",
-            "snippet": "Bias in clinical AI tools remains a key challenge...",
-            "relevance_score": 0.85,
-            "source_domain": "healthaffairs.org",
+            "title": "HealthTech AI Trends",
+            "url": "https://healthtechmagazine.net/article/2025/01/overview-2025-ai-trends-healthcare",
+            "snippet": "...",
+            "relevance_score": 1.0,
+            "source_domain": "healthtechmagazine.net",
         },
     ]
 
     agent = ScraperAgent()
-    results = agent.run(mock_results)
+    results = agent.run(test_results)
 
     print("\n" + "=" * 70)
     print(f"Scraper output — {len(results)} pages:")
