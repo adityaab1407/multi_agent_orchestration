@@ -27,6 +27,7 @@ from agents.analysis import AnalysisAgent
 from agents.planner import PlannerAgent
 from agents.scraper import ScraperAgent
 from agents.search import SearchAgent
+from agents.writer import WriterAgent
 from config.settings import (
     LANGFUSE_HOST,
     LANGFUSE_PUBLIC_KEY,
@@ -362,20 +363,74 @@ def visual_node(state: NewsForgeState) -> dict[str, Any]:
 
 
 def writer_node(state: NewsForgeState) -> dict[str, Any]:
-    """Compose a polished research report from the analysis and visuals.
+    """Compose a polished research report from the analysis and search results.
 
     Reads from state:
-        - topic, analysis, visuals, critic_feedback.
+        - topic: the user-supplied research topic string.
+        - analysis: AnalysisOutput dict from the Analysis Agent.
+        - search_results: list of SearchResult dicts (for citation building).
+        - subtasks: list of Subtask dicts (for research angle context).
 
     Writes to state:
-        - draft_report: (Phase 2) Markdown string of the full report.
-
-    Current behaviour:
-        Pass-through stub — returns state unchanged.
+        - draft_report: full Markdown research report string.
+        - pipeline_status: set to "writer_complete".
+        - errors: appended to on failure.
     """
-    # Phase 2 — not yet implemented
-    print("[writer_node] STUB — pass-through, no writing yet")
-    return {"pipeline_status": "writer_node running"}
+    topic = state.get("topic", "")
+    analysis = state.get("analysis")
+    search_results = state.get("search_results", [])
+    subtasks = state.get("subtasks", [])
+
+    if not analysis:
+        print("[writer_node] No analysis available — skipping")
+        return {"pipeline_status": "writer_skipped"}
+
+    print(f"[writer_node] Writing report for: {topic!r}")
+
+    try:
+        with langfuse.start_as_current_observation(
+            name="writer_node",
+            metadata={
+                "research_id": state.get("research_id", ""),
+                "topic": topic,
+                "themes_count": len(analysis.get("themes", [])),
+                "sources_count": analysis.get("sources_analysed", 0),
+            },
+        ) as trace:
+
+            agent = WriterAgent()
+            report = agent.run(
+                topic=topic,
+                analysis=analysis,
+                search_results=search_results,
+                subtasks=subtasks,
+            )
+
+            trace.create_event(
+                name="writer_complete",
+                metadata={
+                    "word_count": report["word_count"],
+                    "section_count": report["section_count"],
+                    "title": report["title"],
+                },
+            )
+
+        langfuse.flush()
+
+        print(
+            f"[writer_node] Done — {report['word_count']} words, "
+            f"{report['section_count']} sections. "
+            f"Trace id: {trace.trace_id}"
+        )
+
+        return {
+            "draft_report": report["full_report"],
+            "pipeline_status": "writer_complete",
+        }
+
+    except Exception as e:
+        print(f"[writer_node] ERROR: {e}")
+        return {"errors": [f"writer_node failed: {str(e)}"]}
 
 
 def critic_node(state: NewsForgeState) -> dict[str, Any]:
@@ -514,3 +569,10 @@ if __name__ == "__main__":
         print(f"  Score    : {r['relevance_score']:.2f}")
         print(f"  Snippet  : {r['snippet'][:120]}...")
         print()
+
+    # Print draft report preview
+    if result.get("draft_report"):
+        report = result["draft_report"]
+        print(f"\n📝 DRAFT REPORT PREVIEW:")
+        print(f"   Words  : {len(report.split())}")
+        print(f"   Preview: {report[:500]}...")

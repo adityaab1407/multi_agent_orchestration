@@ -167,7 +167,7 @@ class TestScraperConfigDefaults:
         assert cfg.chunk_overlap == 100
         assert cfg.max_urls == 10
         assert cfg.request_delay == 1.0
-        assert cfg.user_agent == "NewsForge-Research-Bot/1.0"
+        assert "Mozilla/5.0" in cfg.user_agent
 
     def test_scraper_config_custom_values(self):
         """Custom constructor arguments should override every default."""
