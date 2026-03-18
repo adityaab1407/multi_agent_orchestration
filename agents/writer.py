@@ -86,33 +86,45 @@ class WriterAgent:
         analysis: dict[str, Any],
         search_results: list[dict[str, Any]],
         subtasks: list[dict[str, Any]],
+        feedback_notes: list[str] | None = None,
     ) -> dict[str, Any]:
         """Generate a complete research report and return a WriterOutputSchema dict.
 
         Steps:
         1. Build a deduplicated numbered citation list from ``search_results``.
         2. Construct system + user prompts with all analysis data.
-        3. Single LLM call to generate the full markdown report.
-        4. Strip accidental backtick fences from LLM output.
-        5. Extract title, executive summary, and section count from markdown.
+        3. If ``feedback_notes`` is provided (revision pass), append them to the
+           user prompt so the LLM knows what to fix.
+        4. Single LLM call to generate the full markdown report.
+        5. Strip accidental backtick fences from LLM output.
+        6. Extract title, executive summary, and section count from markdown.
 
         Args:
             topic: The research topic string.
             analysis: AnalysisOutput dict from the Analysis Agent.
             search_results: List of SearchResult dicts from the Search Agent.
             subtasks: List of Subtask dicts from the Planner Agent.
+            feedback_notes: Optional list of revision instructions from the Critic.
+                When provided, the Writer is in revision mode and will incorporate
+                this feedback into the rewritten report.
 
         Returns:
             A ``dict`` with keys matching ``WriterOutputSchema``.
         """
-        print(f"[Writer] Generating report for: {topic!r}")
+        if feedback_notes:
+            print(f"[Writer] Revising report for: {topic!r} "
+                  f"({len(feedback_notes)} feedback notes)")
+        else:
+            print(f"[Writer] Generating report for: {topic!r}")
 
         # 1. Build citations
         citations = self._format_citations(search_results)
 
         # 2. Build prompts
         system_prompt = self._build_system_prompt()
-        user_prompt = self._build_user_prompt(topic, analysis, citations, subtasks)
+        user_prompt = self._build_user_prompt(
+            topic, analysis, citations, subtasks, feedback_notes,
+        )
 
         # 3. Single LLM call
         response = self.llm.invoke([
@@ -196,6 +208,7 @@ class WriterAgent:
         analysis: dict[str, Any],
         citations: list[str],
         subtasks: list[dict[str, Any]],
+        feedback_notes: list[str] | None = None,
     ) -> str:
         """Build the user prompt containing all research data for the LLM.
 
@@ -203,16 +216,33 @@ class WriterAgent:
         contradictions, key facts, confidence score, coverage gaps, and the
         numbered citation list.
 
+        When ``feedback_notes`` is provided (revision pass), a REVISION
+        INSTRUCTIONS section is prepended so the LLM knows exactly what
+        to fix in the rewritten report.
+
         Args:
             topic: The research topic string.
             analysis: AnalysisOutput dict from the Analysis Agent.
             citations: Numbered citation list from ``_format_citations``.
             subtasks: List of Subtask dicts from the Planner Agent.
+            feedback_notes: Optional list of revision instructions from the Critic.
 
         Returns:
             A user prompt string.
         """
         parts: list[str] = []
+
+        # Revision feedback (if this is a revision pass)
+        if feedback_notes:
+            parts.append("⚠ REVISION INSTRUCTIONS (from quality review):")
+            parts.append("The previous draft was reviewed and needs improvement.")
+            parts.append("Address ALL of the following issues:")
+            for i, note in enumerate(feedback_notes, 1):
+                parts.append(f"  {i}. {note}")
+            parts.append("")
+            parts.append("Rewrite the COMPLETE report incorporating these fixes.")
+            parts.append("Do not just patch — produce a polished final version.")
+            parts.append("")
 
         # Topic
         parts.append(f"RESEARCH TOPIC: {topic}")

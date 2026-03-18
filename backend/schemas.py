@@ -83,23 +83,52 @@ class SearchResultResponse(BaseModel):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+class CriticFeedbackResponse(BaseModel):
+    """Critic agent evaluation result."""
+
+    passed: bool
+    quality_score: float
+    feedback_notes: list[str] = Field(default_factory=list)
+
+
 class ResearchResponse(BaseModel):
     """Full output returned after a pipeline run completes.
 
-    Contains the decomposed subtasks, search results, error log, and
-    timing metadata.
+    Contains the decomposed subtasks, search results, analysis,
+    draft report, critic feedback, and publishing metadata.
     """
 
     research_id: str
     topic: str
     status: str = Field(
         ...,
-        description='"complete" | "partial" | "failed"',
+        description=(
+            '"complete" | "partial" | "failed" | '
+            '"awaiting_approval" | "rejected"'
+        ),
     )
     subtasks: list[SubtaskResponse]
     search_results: list[SearchResultResponse]
     subtask_count: int
     result_count: int
+
+    # Rich pipeline data
+    scraped_content: Optional[list[dict]] = Field(
+        default=None, description="Scraper output"
+    )
+    analysis: Optional[dict] = Field(
+        default=None, description="Analysis output with themes, key_facts, contradictions"
+    )
+    draft_report: Optional[str] = Field(
+        default=None, description="Full markdown report from Writer"
+    )
+    critic_feedback: Optional[CriticFeedbackResponse] = Field(
+        default=None, description="Critic evaluation"
+    )
+    revision_count: int = Field(default=0)
+    published_url: Optional[str] = Field(default=None)
+    published_record_id: Optional[str] = Field(default=None)
+
     errors: list[str]
     created_at: str = Field(..., description="ISO 8601 timestamp")
     completed_at: str = Field(..., description="ISO 8601 timestamp")
@@ -138,3 +167,51 @@ class PipelineStatusResponse(BaseModel):
 
     pipeline_version: str = Field(default="1.0.0")
     agents: list[AgentStatus]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Human-in-the-Loop (HITL) schemas
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class ReviewRequest(BaseModel):
+    """Incoming request to approve or reject a paused pipeline run."""
+
+    research_id: str = Field(
+        ...,
+        description="The research_id of the paused pipeline run",
+    )
+
+
+class ReviewStatusResponse(BaseModel):
+    """Status of a specific research pipeline run.
+
+    Returned by ``GET /research/{research_id}/status`` so the frontend
+    can poll for the current state of a run.
+    """
+
+    research_id: str
+    status: str = Field(
+        ...,
+        description=(
+            '"running" | "awaiting_approval" | "approved" | '
+            '"rejected" | "complete" | "failed"'
+        ),
+    )
+    topic: str
+    report_preview: Optional[str] = Field(
+        default=None,
+        description="First 1000 chars of the draft report (set when awaiting_approval)",
+    )
+    quality_score: Optional[float] = Field(
+        default=None,
+        description="Critic quality score (set when awaiting_approval)",
+    )
+    word_count: Optional[int] = Field(
+        default=None,
+        description="Report word count (set when awaiting_approval)",
+    )
+    revision_count: Optional[int] = Field(
+        default=None,
+        description="Number of revision passes (set when awaiting_approval)",
+    )

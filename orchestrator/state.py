@@ -126,7 +126,10 @@ class NewsForgeState(TypedDict):
     critic_feedback: Optional[CriticFeedback]
     revision_count: int                       # incremented each Writer→Critic loop
 
-    # --- Publisher Agent output (Phase 2) ---
+    # --- Human-in-the-Loop (HITL) review ---
+    human_decision: Optional[str]            # "approved" | "rejected" | None
+
+    # --- Publisher Agent output ---
     published_url: Optional[str]
     published_record_id: Optional[str]
 
