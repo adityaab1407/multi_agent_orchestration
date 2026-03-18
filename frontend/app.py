@@ -14,13 +14,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import os
 import time
 
 import requests
 import streamlit as st
 
 # ─── Backend URL ──────────────────────────────────────────────────────────
-BACKEND_URL = "http://localhost:8080"
+BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8080")
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Page config (must be first Streamlit call)

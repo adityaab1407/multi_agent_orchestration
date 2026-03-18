@@ -2,8 +2,6 @@
 # NewsForge Multi-Agent Research System
 # Usage: docker compose up --build
 # ───────────────────────────────────────────────────────────────────────
-version: "3.9"
-
 services:
   backend:
     build:
