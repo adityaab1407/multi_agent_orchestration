@@ -1,5 +1,5 @@
 """Planner agent that decomposes research topics into subtasks via a ReAct loop
-calling Groq (llama-3.3-70b) with self-assessed coverage quality.
+with self-assessed coverage quality.
 """
 
 from __future__ import annotations
@@ -13,10 +13,11 @@ from pydantic import BaseModel, Field
 
 from config.settings import (
     GROQ_API_KEY,
-    GROQ_MODEL_NAME,
+    GROQ_REASONING_MODEL,
     MAX_REACT_ITERATIONS,
     PLANNING_QUALITY_THRESHOLD,
 )
+from utils.llm_utils import strip_llm_response
 
 
 class SubtaskSchema(BaseModel):
@@ -75,10 +76,14 @@ class PlannerAgent:
     parsing the response, and checking coverage_score against the threshold.
     Gaps from low-scoring iterations are fed back for self-correction."""
 
+    # Pool A — Reasoning model
+    # ReAct loop requires strong instruction following
+    # and consistent JSON output under iteration pressure
+
     def __init__(self) -> None:
         self.llm = ChatGroq(
             api_key=GROQ_API_KEY,
-            model=GROQ_MODEL_NAME,
+            model=GROQ_REASONING_MODEL,
             temperature=0.4,
         )
         self.max_iterations: int = MAX_REACT_ITERATIONS
@@ -196,13 +201,7 @@ class PlannerAgent:
         response: str,
         iteration: int,
     ) -> PlannerOutput:
-        # Strip markdown fences if the LLM wraps its output despite instructions
-        cleaned = response.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[-1]
-        if cleaned.endswith("```"):
-            cleaned = cleaned.rsplit("```", 1)[0]
-        cleaned = cleaned.strip()
+        cleaned = strip_llm_response(response)
 
         try:
             data = json.loads(cleaned)

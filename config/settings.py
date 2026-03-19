@@ -10,7 +10,58 @@ load_dotenv(_PROJECT_ROOT / ".env")
 
 # LLM — Groq
 GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL_NAME: str = os.getenv("GROQ_MODEL_NAME", "llama-3.3-70b-versatile")
+
+# =============================================================
+# MODEL ROUTING STRATEGY
+# Two pools for rate dispersion:
+#
+# Pool A — Reasoning (llama-4-scout, 30K TPM):
+#   Planner, Analysis, Critic
+#   Rationale: 30K TPM handles large ReAct prompts.
+#   Analysis sends ~6500 tokens per iteration.
+#   Critic moved here because Writer(5500t) +
+#   Critic(2500t) exceeded 8B's 6K TPM limit.
+#   Scout is purpose-built for agentic workloads.
+#
+# Pool B — Execution (llama-3.1-8b, 6K TPM):
+#   Writer, Judge
+#   Rationale: Structured generation and rubric
+#   scoring do not require large model reasoning.
+#   Writer alone (5500t) fits under 6K TPM.
+#   Separate pool = independent rate limits.
+#
+# Token budget per 10-topic benchmark:
+#   Pool A: ~102K / 500K TPD = 20% used
+#   Pool B: ~80K / 500K TPD = 16% used
+# =============================================================
+
+# --- Model Routing ---
+# Pool A: Reasoning/Agentic tasks
+# High TPM (30K) for large ReAct loop prompts
+GROQ_REASONING_MODEL: str = os.getenv(
+    "GROQ_REASONING_MODEL",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+)
+
+# Pool B: Execution/Evaluation tasks
+# Separate rate limit pool for rate dispersion
+# Sufficient for structured generation + scoring
+GROQ_EXECUTION_MODEL: str = os.getenv(
+    "GROQ_EXECUTION_MODEL",
+    "llama-3.1-8b-instant",
+)
+
+# Judge uses execution pool — evaluation = structured scoring
+GROQ_JUDGE_MODEL: str = os.getenv(
+    "GROQ_JUDGE_MODEL",
+    "llama-3.1-8b-instant",
+)
+
+# Keep for backwards compatibility
+GROQ_MODEL_NAME: str = os.getenv(
+    "GROQ_MODEL_NAME",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+)
 
 # Search — Tavily
 TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")

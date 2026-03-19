@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import sys
 import textwrap
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from langchain_groq import ChatGroq
 from pydantic import BaseModel, Field
 
-from config.settings import GROQ_API_KEY, GROQ_MODEL_NAME
+from config.settings import GROQ_API_KEY, GROQ_REASONING_MODEL
+from utils.llm_utils import strip_llm_response
 
 
 MAX_REVISIONS: int = 2
@@ -60,11 +62,16 @@ class CriticAgent:
     revision instructions for the Writer.
     """
 
+    # Pool A — Reasoning model (Scout)
+    # Moved from Pool B to avoid TPM collision:
+    # Writer(5500t) + Critic(2500t) > 6K TPM limit
+    # Scout's 30K TPM handles all reasoning agents cleanly
+
     def __init__(self, config: CriticConfig | None = None) -> None:
         self.config = config or CriticConfig()
         self.llm = ChatGroq(
             api_key=GROQ_API_KEY,
-            model=GROQ_MODEL_NAME,
+            model=GROQ_REASONING_MODEL,
             temperature=self.config.temperature,
         )
 
@@ -83,12 +90,12 @@ class CriticAgent:
             draft_report, analysis, subtasks, revision_count,
         )
 
-        response = self.llm.invoke([
+        raw_response = self._invoke_with_retry([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ])
 
-        output = self._parse_llm_response(response.content)
+        output = self._parse_llm_response(raw_response)
 
         status = "PASSED" if output.passed else "NEEDS REVISION"
         print(
@@ -104,6 +111,42 @@ class CriticAgent:
                 print(f"[Critic]   - {note}")
 
         return output.model_dump()
+
+    def _invoke_with_retry(
+        self,
+        messages: list,
+        max_retries: int = 3,
+        retry_delay: float = 2.0,
+    ) -> str:
+        """Invoke LLM with retry on transient network errors.
+
+        Retries on connection errors but NOT on rate limits.
+        Rate limit errors (429) are raised immediately.
+        """
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = self.llm.invoke(messages)
+                return response.content
+            except Exception as e:
+                error_str = str(e)
+
+                # Rate limit — don't retry, raise immediately
+                if "429" in error_str or "rate_limit" in error_str:
+                    raise
+
+                # Connection error — retry with backoff
+                last_error = e
+                if attempt < max_retries:
+                    print(
+                        f"[Critic] Connection error (attempt "
+                        f"{attempt}/{max_retries}), "
+                        f"retrying in {retry_delay}s..."
+                    )
+                    time.sleep(retry_delay)
+                    retry_delay *= 1.5  # gentle backoff
+
+        raise last_error
 
     def _build_system_prompt(self) -> str:
         dimensions_str = ", ".join(self.config.scoring_dimensions)
@@ -234,25 +277,23 @@ class CriticAgent:
     def _parse_llm_response(self, response: str) -> CriticOutputSchema:
         """Parse and validate the raw LLM JSON response.
 
-        Recomputes quality_score as the mean of dimension scores and enforces
-        pass/fail consistency with the threshold.
-        """
-        cleaned = response.strip()
+        Strips <think>...</think> blocks (Qwen3, DeepSeek-R1) and markdown
+        fences, then recomputes quality_score as the mean of dimension scores
+        and enforces pass/fail consistency with the threshold.
 
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[-1]
-        if cleaned.endswith("```"):
-            cleaned = cleaned.rsplit("```", 1)[0]
-        cleaned = cleaned.strip()
+        Falls back to a default passing output on parse failure rather than
+        crashing the pipeline.
+        """
+        cleaned = strip_llm_response(response)
 
         try:
             data = json.loads(cleaned)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"Critic LLM returned invalid JSON. "
-                f"JSONDecodeError: {exc}. "
-                f"Raw response (first 500 chars): {response[:500]}"
-            ) from exc
+        except (json.JSONDecodeError, ValueError):
+            print(
+                f"[Critic] JSON parse failed — using fallback scores. "
+                f"Raw response (first 300 chars): {response[:300]}"
+            )
+            return self.make_fallback_output()
 
         # Recompute quality_score as mean of dimension scores for consistency
         dim_scores = data.get("dimension_scores", [])
@@ -268,11 +309,12 @@ class CriticAgent:
 
         try:
             return CriticOutputSchema.model_validate(data)
-        except Exception as exc:
-            raise ValueError(
-                f"Critic LLM JSON failed Pydantic validation: {exc}. "
+        except Exception:
+            print(
+                f"[Critic] Pydantic validation failed — using fallback scores. "
                 f"Parsed data keys: {list(data.keys())}"
-            ) from exc
+            )
+            return self.make_fallback_output()
 
     def make_fallback_output(self) -> CriticOutputSchema:
         """Return a minimal passing output when the LLM call fails.

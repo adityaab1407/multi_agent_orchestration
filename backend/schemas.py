@@ -158,6 +158,21 @@ class PipelineStatusResponse(BaseModel):
 
 
 
+class ResearchStartResponse(BaseModel):
+    """Immediate response when a pipeline run is kicked off.
+
+    The frontend uses ``research_id`` to poll ``GET /research/{id}/status``
+    until the pipeline reaches the HITL pause or completes.
+    """
+
+    research_id: str
+    status: str = Field(
+        default="running",
+        description="Always 'running' at start time",
+    )
+    topic: str
+
+
 class ReviewRequest(BaseModel):
     """Incoming request to approve or reject a paused pipeline run."""
 
@@ -198,4 +213,8 @@ class ReviewStatusResponse(BaseModel):
     revision_count: Optional[int] = Field(
         default=None,
         description="Number of revision passes (set when awaiting_approval)",
+    )
+    error: Optional[str] = Field(
+        default=None,
+        description="Error message if the pipeline failed",
     )

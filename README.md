@@ -68,7 +68,9 @@ User Topic
 | Component | Technology |
 |---|---|
 | Orchestration | LangGraph (StateGraph, 7 nodes) |
-| LLM | Groq — `llama-3.3-70b-versatile` |
+| LLM (Reasoning) | Groq — `meta-llama/llama-4-scout-17b-16e-instruct` |
+| LLM (Execution) | Groq — `llama-3.1-8b-instant` |
+| LLM (Judge) | Groq — `llama-3.1-8b-instant` |
 | Web Search | Tavily API |
 | Observability | Langfuse v3 |
 | Backend | FastAPI (port 8080) |
@@ -95,11 +97,15 @@ pip install -r requirements.txt
 
 ### 2. Environment Variables
 
-Create a `.env` file in the project root:
+Create a `.env` file in the project root (copy from `.env.example`):
+
+> **API Keys Required:** Create a dedicated Groq API key for NewsForge — do not reuse keys from other projects. This keeps token usage and rate limits isolated per project.
 
 ```env
-GROQ_API_KEY=gsk_your_key_here
-GROQ_MODEL_NAME=llama-3.3-70b-versatile
+GROQ_API_KEY=gsk_your_newsforge_dedicated_key_here
+GROQ_MODEL_NAME=llama-3.1-8b-instant
+GROQ_REASONING_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
+GROQ_JUDGE_MODEL=llama-3.1-8b-instant
 TAVILY_API_KEY=tvly-dev-your_key_here
 LANGFUSE_PUBLIC_KEY=pk-lf-your_key_here
 LANGFUSE_SECRET_KEY=sk-lf-your_key_here

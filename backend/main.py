@@ -1,7 +1,7 @@
 """FastAPI application entry point exposing the NewsForge research pipeline API.
 
 Endpoints:
-    POST /research                          — Start a research pipeline (pauses for HITL review).
+    POST /research                          — Start a research pipeline (non-blocking).
     POST /research/{research_id}/approve    — Resume a paused pipeline with approval.
     POST /research/{research_id}/reject     — Resume a paused pipeline with rejection.
     GET  /research/{research_id}/status     — Poll current status of a pipeline run.
@@ -10,11 +10,14 @@ Endpoints:
     GET  /                                  — Root welcome with docs link.
 
 Human-in-the-Loop (HITL) flow:
-    1. POST /research starts the pipeline.  It runs through all agents until
-       the human_review_node, which calls LangGraph's ``interrupt()`` to PAUSE.
-    2. The API returns status="awaiting_approval" with a report preview.
-    3. The frontend calls POST /approve or /reject to resume the pipeline.
-    4. On approve: publisher runs → report saved → status="complete".
+    1. POST /research starts the pipeline in a background thread and returns
+       immediately with ``status="running"`` and a ``research_id``.
+    2. The frontend polls ``GET /research/{research_id}/status`` every ~2s.
+    3. When the pipeline reaches the human_review_node, LangGraph's
+       ``interrupt()`` pauses execution.  The status becomes
+       ``"awaiting_approval"`` with a report preview.
+    4. The frontend calls POST /approve or /reject to resume the pipeline.
+    5. On approve: publisher runs → report saved → status="complete".
        On reject:  pipeline ends immediately → status="rejected".
 
     The pipeline state is persisted in SQLite via LangGraph's checkpointer,
@@ -23,12 +26,12 @@ Human-in-the-Loop (HITL) flow:
 """
 
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import asyncio
-import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -44,6 +47,7 @@ from backend.schemas import (
     PipelineStatusResponse,
     ResearchRequest,
     ResearchResponse,
+    ResearchStartResponse,
     ReviewStatusResponse,
     SearchResultResponse,
     SubtaskResponse,
@@ -51,14 +55,15 @@ from backend.schemas import (
 from orchestrator.graph import pipeline
 from orchestrator.state import NewsForgeState
 
+# ── In-memory run tracker ────────────────────────────────────────────────
+# Keys: research_id → dict with status, result, thread, error, etc.
 active_runs: dict[str, dict[str, Any]] = {}
-
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown hook for the FastAPI application."""
-    print("NewsForge API started — docs at http://localhost:8000/docs")
+    print("NewsForge API started — docs at http://localhost:8080/docs")
     yield
 
 
@@ -81,18 +86,80 @@ app.add_middleware(
 )
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Background pipeline execution
+# ═══════════════════════════════════════════════════════════════════════════
 
-@app.post("/research", response_model=ResearchResponse)
-async def run_research(request: ResearchRequest) -> ResearchResponse:
+def _run_pipeline_background(
+    research_id: str,
+    topic: str,
+    initial_state: dict[str, Any],
+) -> None:
+    """Execute the LangGraph pipeline in a background thread.
+
+    Updates ``active_runs[research_id]`` as the pipeline progresses:
+      - ``"running"``            while agents are executing
+      - ``"awaiting_approval"``  when human_review_node calls ``interrupt()``
+      - ``"complete"``           if pipeline finishes without interrupt (rare)
+      - ``"failed"``             on any unhandled exception
+    """
+    config: dict[str, Any] = {"configurable": {"thread_id": research_id}}
+
+    try:
+        result: dict[str, Any] = pipeline.invoke(initial_state, config)
+
+        # Check if the pipeline paused at an interrupt
+        graph_state = pipeline.get_state(config)
+        is_interrupted = bool(graph_state.next)
+
+        if is_interrupted:
+            # Extract the interrupt payload (report preview, quality score, etc.)
+            interrupt_data: dict[str, Any] = {}
+            if graph_state.tasks:
+                for task in graph_state.tasks:
+                    if hasattr(task, "interrupts") and task.interrupts:
+                        interrupt_data = task.interrupts[0].value
+                        break
+
+            active_runs[research_id].update({
+                "status": "awaiting_approval",
+                "result": result,
+                "report_preview": interrupt_data.get("report_preview"),
+                "quality_score": interrupt_data.get("quality_score"),
+                "word_count": interrupt_data.get("word_count"),
+                "revision_count": interrupt_data.get("revision_count"),
+            })
+            print(
+                f"[Pipeline] {research_id[:8]} — paused at HITL, "
+                f"quality_score={interrupt_data.get('quality_score')}"
+            )
+        else:
+            # Completed without interrupt (shouldn't happen in normal flow)
+            active_runs[research_id].update({
+                "status": "complete",
+                "result": result,
+            })
+            print(f"[Pipeline] {research_id[:8]} — completed without HITL pause")
+
+    except Exception as exc:
+        active_runs[research_id].update({
+            "status": "failed",
+            "error": str(exc),
+        })
+        print(f"[Pipeline] {research_id[:8]} — FAILED: {exc}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Endpoints
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.post("/research", response_model=ResearchStartResponse)
+async def run_research(request: ResearchRequest) -> ResearchStartResponse:
     """Start the full NewsForge research pipeline for a given topic.
 
-    The pipeline runs through all 7 agents until it reaches the
-    ``human_review_node``, where LangGraph's ``interrupt()`` pauses
-    execution.  The response includes ``status="awaiting_approval"``
-    with a preview of the report so the human can decide.
-
-    To continue, call ``POST /research/{research_id}/approve`` or
-    ``POST /research/{research_id}/reject``.
+    Returns immediately with a ``research_id`` and ``status="running"``.
+    The pipeline executes in a background thread.  Poll
+    ``GET /research/{research_id}/status`` to track progress.
     """
     print(f"[API] POST /research — topic: {request.topic!r}")
 
@@ -118,69 +185,33 @@ async def run_research(request: ResearchRequest) -> ResearchResponse:
         "completed_at": None,
     }
 
-    config: dict[str, Any] = {"configurable": {"thread_id": research_id}}
-
-    # Track this run
+    # Register this run before starting the thread
     active_runs[research_id] = {
         "thread_id": research_id,
         "topic": request.topic,
         "status": "running",
+        "result": None,
         "report_preview": None,
         "quality_score": None,
         "word_count": None,
         "revision_count": None,
         "created_at": created_at,
+        "error": None,
     }
 
-    try:
-        # Pipeline will run until human_review_node calls interrupt(),
-        # then return control here with the graph in a paused state.
-        result: dict[str, Any] = await asyncio.to_thread(
-            pipeline.invoke,
-            initial_state,
-            config,
-        )
-    except Exception as e:
-        active_runs[research_id]["status"] = "failed"
-        raise HTTPException(status_code=500, detail=str(e))
+    # Launch the pipeline in a background thread — non-blocking
+    thread = threading.Thread(
+        target=_run_pipeline_background,
+        args=(research_id, request.topic, initial_state),
+        daemon=True,
+    )
+    thread.start()
 
-    # ── Check if the pipeline paused at an interrupt ───────────────────
-    # When interrupt() fires, pipeline.invoke() returns the state at the
-    # point of interruption.  We detect this by checking pipeline status
-    # or the presence of interrupt metadata via get_state().
-    graph_state = pipeline.get_state(config)
-    is_interrupted = bool(graph_state.next)  # non-empty = paused at a node
-
-    if is_interrupted:
-        # Extract the interrupt payload from the graph state
-        # The interrupt value is stored in state tasks
-        interrupt_data = {}
-        if graph_state.tasks:
-            for task in graph_state.tasks:
-                if hasattr(task, "interrupts") and task.interrupts:
-                    interrupt_data = task.interrupts[0].value
-                    break
-
-        active_runs[research_id].update({
-            "status": "awaiting_approval",
-            "report_preview": interrupt_data.get("report_preview"),
-            "quality_score": interrupt_data.get("quality_score"),
-            "word_count": interrupt_data.get("word_count"),
-            "revision_count": interrupt_data.get("revision_count"),
-        })
-
-        # Return a response indicating the pipeline is paused
-        subtasks_raw = result.get("subtasks", [])
-        results_raw = result.get("search_results", [])
-
-        return _build_response_from_result(
-            result, research_id, request.topic, created_at,
-            status_override="awaiting_approval", completed_at_override="",
-        )
-
-    # If pipeline completed without interrupt (shouldn't happen in normal
-    # flow, but handle gracefully)
-    return _build_response_from_result(result, research_id, request.topic, created_at)
+    return ResearchStartResponse(
+        research_id=research_id,
+        status="running",
+        topic=request.topic,
+    )
 
 
 @app.post("/research/{research_id}/approve", response_model=ResearchResponse)
@@ -216,6 +247,7 @@ async def approve_research(research_id: str) -> ResearchResponse:
         raise HTTPException(status_code=500, detail=str(e))
 
     active_runs[research_id]["status"] = "complete"
+    active_runs[research_id]["result"] = result
 
     return _build_response_from_result(
         result, research_id, run["topic"], run["created_at"]
@@ -250,10 +282,7 @@ async def reject_research(research_id: str) -> ResearchResponse:
         raise HTTPException(status_code=500, detail=str(e))
 
     active_runs[research_id]["status"] = "rejected"
-    completed_at = datetime.now(timezone.utc).isoformat()
-
-    subtasks_raw = result.get("subtasks", [])
-    results_raw = result.get("search_results", [])
+    active_runs[research_id]["result"] = result
 
     return _build_response_from_result(
         result, research_id, run["topic"], run["created_at"],
@@ -265,8 +294,8 @@ async def reject_research(research_id: str) -> ResearchResponse:
 async def get_research_status(research_id: str) -> ReviewStatusResponse:
     """Poll the current status of a pipeline run.
 
-    Useful for frontends that need to know when the pipeline has
-    reached the human review point.
+    Returns lightweight status while running, enriched data when
+    the pipeline reaches the HITL pause point.
     """
     run = _get_active_run(research_id)
 
@@ -278,6 +307,7 @@ async def get_research_status(research_id: str) -> ReviewStatusResponse:
         quality_score=run.get("quality_score"),
         word_count=run.get("word_count"),
         revision_count=run.get("revision_count"),
+        error=run.get("error"),
     )
 
 
@@ -347,6 +377,9 @@ async def root() -> dict[str, str]:
     }
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Internal helpers
+# ═══════════════════════════════════════════════════════════════════════════
 
 def _get_active_run(research_id: str) -> dict[str, Any]:
     """Look up an active run or raise 404."""
@@ -371,7 +404,11 @@ def _build_response_from_result(
     Populates all rich fields (analysis, draft_report, critic_feedback, etc.)
     so the frontend has full visibility into the pipeline output.
     """
-    completed_at = completed_at_override if completed_at_override is not None else datetime.now(timezone.utc).isoformat()
+    completed_at = (
+        completed_at_override
+        if completed_at_override is not None
+        else datetime.now(timezone.utc).isoformat()
+    )
 
     errors = result.get("errors", [])
     subtasks_raw = result.get("subtasks", [])

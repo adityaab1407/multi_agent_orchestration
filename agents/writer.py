@@ -15,7 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from langchain_groq import ChatGroq
 from pydantic import BaseModel
 
-from config.settings import GROQ_API_KEY, GROQ_MODEL_NAME
+from config.settings import GROQ_API_KEY, GROQ_EXECUTION_MODEL
+from utils.llm_utils import strip_llm_response
 
 
 class WriterOutputSchema(BaseModel):
@@ -33,10 +34,15 @@ class WriterAgent:
     No ReAct loop — the analysis has already been validated by the Analysis Agent.
     """
 
+    # Pool B — Execution model
+    # Structured markdown generation does not
+    # require reasoning capability.
+    # Separate pool = independent rate limits.
+
     def __init__(self) -> None:
         self.llm = ChatGroq(
             api_key=GROQ_API_KEY,
-            model=GROQ_MODEL_NAME,
+            model=GROQ_EXECUTION_MODEL,
             temperature=0.5,
         )
 
@@ -71,8 +77,7 @@ class WriterAgent:
             {"role": "user", "content": user_prompt},
         ])
 
-        markdown = response.content.strip()
-        markdown = self._strip_markdown_fences(markdown)
+        markdown = strip_llm_response(response.content)
 
         title = self._extract_title(markdown)
         executive_summary = self._extract_executive_summary(markdown)

@@ -167,3 +167,30 @@ class NewsForgeState(TypedDict):
 ```
 
 Without `&`, PowerShell treats the path as a string, not a command.
+
+---
+
+## 11. Model Routing and Rate Dispersion
+
+Choosing one model for all agents is the obvious first approach — and the wrong one for production agent systems. Here is the evolution:
+
+**Phase 1: llama-3.3-70b everywhere**
+Problem: 100K TPD exhausted after 1 pipeline run + benchmark. Fine for demos, not for evaluation.
+
+**Phase 2: qwen/qwen3-32b for reasoning**
+Problem: 6K TPM. Analysis agent sends ~6500 tokens per call — single call saturates per-minute budget.
+
+**Phase 3: Two-pool routing**
+- Pool A (Scout 17B): Planner, Analysis
+- Pool B (8B Instant): Writer, Critic, Judge
+  Problem discovered: Writer(5500t) + Critic(2500t) fire back-to-back = 8000 tokens in under a minute, exceeding 8B's 6K TPM limit.
+
+**Phase 4: Rebalanced routing (current)**
+- Pool A (Scout 17B, 30K TPM): Planner, Analysis, Critic
+  Rationale: 30K TPM handles all three comfortably. Critic moved here to avoid TPM collision with Writer on Pool B.
+- Pool B (8B Instant, 6K TPM): Writer, Judge
+  Rationale: Writer alone (5500t) fits under 6K TPM. Judge runs separately during benchmark, never back-to-back with Writer.
+
+**Key insight:** In multi-agent systems, per-minute (TPM) limits matter as much as daily (TPD) limits. A single large Analysis call can exhaust TPM even when daily quota is abundant. Model selection must account for the token profile of each individual agent call, not just the overall pipeline.
+
+**Additional lesson:** Use dedicated API keys per project. Sharing keys across projects (NewsForge + RAG Benchmark) makes token tracking and rate limit attribution impossible. One key per project is non-negotiable.

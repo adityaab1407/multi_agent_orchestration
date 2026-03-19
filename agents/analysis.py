@@ -20,10 +20,11 @@ from pydantic import BaseModel, Field
 
 from config.settings import (
     GROQ_API_KEY,
-    GROQ_MODEL_NAME,
+    GROQ_REASONING_MODEL,
     MAX_REACT_ITERATIONS,
     PLANNING_QUALITY_THRESHOLD,
 )
+from utils.llm_utils import strip_llm_response
 
 
 @dataclass
@@ -31,10 +32,10 @@ class AnalysisConfig:
     temperature: float = 0.2
     max_iterations: int = MAX_REACT_ITERATIONS
     quality_threshold: float = PLANNING_QUALITY_THRESHOLD
-    # 20 000 chars ~ 5 000 tokens — leaves ample room for the JSON reply
-    # within llama-3.3-70b-versatile's 128K context window.
-    max_content_chars: int = 20_000
-    max_chars_per_article: int = 2_000
+    # 8 000 chars ~ 2 000 tokens — prevents Llama 4 Scout from emitting
+    # binary/garbage responses on large corpus inputs.
+    max_content_chars: int = 8_000
+    max_chars_per_article: int = 600
     max_themes: int = 8
     max_key_facts: int = 15
 
@@ -82,11 +83,15 @@ class AnalysisAgent:
     Returns a minimal fallback dict if every iteration fails.
     """
 
+    # Pool A — Reasoning model
+    # Large content summaries (~6500 tokens/call)
+    # require 30K TPM headroom of llama-4-scout
+
     def __init__(self, config: AnalysisConfig | None = None) -> None:
         self.config = config or AnalysisConfig()
         self.llm = ChatGroq(
             api_key=GROQ_API_KEY,
-            model=GROQ_MODEL_NAME,
+            model=GROQ_REASONING_MODEL,
             temperature=self.config.temperature,
         )
 
@@ -169,8 +174,9 @@ class AnalysisAgent:
     ) -> str:
         """Condense scraped articles into a single text corpus for the LLM.
 
-        Sorts "success" before "too_short" so richest content leads.
-        Stops appending once total corpus exceeds ``max_content_chars``.
+        Sorts by word_count descending so richest sources lead.
+        Hard-caps total corpus at ``max_content_chars`` (8K default) to
+        prevent Llama 4 Scout from emitting binary/garbage on large inputs.
         """
         parts: list[str] = []
 
@@ -180,12 +186,12 @@ class AnalysisAgent:
                 parts.append(f"  • {st.get('title', '(untitled)')}")
             parts.append("")
 
-        _PRIORITY: dict[str, int] = {"success": 0, "too_short": 1}
         usable = [
             item for item in scraped_content
-            if item.get("scrape_status") in _PRIORITY
+            if item.get("scrape_status") in ("success", "too_short")
         ]
-        usable.sort(key=lambda x: _PRIORITY.get(x.get("scrape_status", ""), 99))
+        # Richest sources first — maximise information density within char budget
+        usable.sort(key=lambda x: x.get("word_count", 0), reverse=True)
 
         parts.append(
             f"SOURCE DOCUMENTS "
@@ -194,8 +200,12 @@ class AnalysisAgent:
         parts.append("=" * 60)
 
         chars_used = sum(len(p) for p in parts)
+        sources_used = 0
 
         for i, item in enumerate(usable, 1):
+            if chars_used >= self.config.max_content_chars:
+                break
+
             title = item.get("title", "Untitled")
             url = item.get("url", "")
             try:
@@ -209,7 +219,6 @@ class AnalysisAgent:
             block = (
                 f"\n[Source {i}] {title}\n"
                 f"Domain: {domain} | "
-                f"Status: {item.get('scrape_status')} | "
                 f"Words: {word_count}\n\n"
                 f"{text}\n"
                 f"{'─' * 40}"
@@ -225,6 +234,7 @@ class AnalysisAgent:
 
             parts.append(block)
             chars_used += len(block)
+            sources_used += 1
 
         if not usable:
             parts.append(
@@ -232,6 +242,12 @@ class AnalysisAgent:
                 "Analysis will be limited to what can be inferred from context.]\n"
             )
 
+        print(
+            f"[Analysis] Corpus: "
+            f"{len(scraped_content)} articles → "
+            f"{sources_used} used, "
+            f"{chars_used} chars"
+        )
         return "\n".join(parts)
 
     def _build_system_prompt(self) -> str:
@@ -315,16 +331,21 @@ class AnalysisAgent:
     ) -> AnalysisIterationOutput:
         """Parse and validate the raw LLM string into an ``AnalysisIterationOutput``.
 
-        Strips markdown fences defensively (the LLM sometimes wraps JSON in
-        ``` blocks despite instructions).
+        Detects binary/garbage responses (e.g. ``}▯}▯}▯``) that Llama 4 Scout
+        occasionally emits on large inputs.  Strips markdown fences defensively.
         """
-        cleaned = response.strip()
+        # Detect binary/garbage — if <50% of the first 100 chars are printable,
+        # the model returned non-text data and retrying is the only option.
+        if response and len(response) > 10:
+            sample = response[:100]
+            printable = sum(1 for c in sample if c.isprintable())
+            if printable / min(len(response), 100) < 0.5:
+                raise ValueError(
+                    f"Binary/garbage response detected on iteration {iteration}. "
+                    f"Model returned non-text data."
+                )
 
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[-1]
-        if cleaned.endswith("```"):
-            cleaned = cleaned.rsplit("```", 1)[0]
-        cleaned = cleaned.strip()
+        cleaned = strip_llm_response(response)
 
         try:
             data = json.loads(cleaned)

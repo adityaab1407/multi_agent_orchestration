@@ -25,6 +25,9 @@ from agents.search import SearchAgent
 from agents.publisher import PublisherAgent
 from agents.writer import WriterAgent
 from config.settings import (
+    GROQ_EXECUTION_MODEL,
+    GROQ_JUDGE_MODEL,
+    GROQ_REASONING_MODEL,
     LANGFUSE_HOST,
     LANGFUSE_PUBLIC_KEY,
     LANGFUSE_SECRET_KEY,
@@ -322,6 +325,7 @@ def critic_node(state: NewsForgeState) -> dict[str, Any]:
                 "quality_score": 0.0,
                 "feedback_notes": ["No draft report was produced by the Writer"],
             },
+            "revision_count": revision_count + 1,
             "pipeline_status": "critic_skipped",
         }
 
@@ -450,10 +454,17 @@ def human_review_node(state: NewsForgeState) -> dict[str, Any]:
     """
     research_id = state.get("research_id", "unknown")
     topic = state.get("topic", "")
-    draft_report = state.get("draft_report", "")
+    draft_report = state.get("draft_report") or ""
     critic_feedback = state.get("critic_feedback") or {}
     revision_count = state.get("revision_count", 0)
     quality_score = critic_feedback.get("quality_score", 0.0)
+
+    if not draft_report:
+        print("[human_review_node] No report — skipping")
+        return {
+            "pipeline_status": "review_skipped",
+            "human_decision": "auto_approved",
+        }
 
     print(f"[human_review_node] Pipeline paused — topic: {topic}, score: {quality_score:.2f}")
 
@@ -569,6 +580,11 @@ if __name__ == "__main__":
     research_id = str(uuid.uuid4())
 
     print(f"NewsForge pipeline — smoke test (ID: {research_id})")
+    print(f"[NewsForge] Model routing:")
+    print(f"  Pool A — Scout (30K TPM) : {GROQ_REASONING_MODEL}")
+    print(f"    └── Planner, Analysis, Critic")
+    print(f"  Pool B — 8B (6K TPM)     : {GROQ_EXECUTION_MODEL}")
+    print(f"    └── Writer, Judge")
 
     initial_state: NewsForgeState = {
         "research_id": research_id,

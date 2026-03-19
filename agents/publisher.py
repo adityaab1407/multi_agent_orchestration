@@ -128,7 +128,8 @@ class PublisherAgent:
         out_dir = Path(self.config.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        filename = f"{research_id}_{slug}" if slug else research_id
+        topic_slug = re.sub(r"[^a-z0-9]+", "-", slug)[:20].rstrip("-")
+        filename = f"report_{research_id[:8]}_{topic_slug}" if topic_slug else f"report_{research_id[:8]}"
 
         report_path = out_dir / f"{filename}.md"
         report_path.write_text(draft_report, encoding="utf-8")
