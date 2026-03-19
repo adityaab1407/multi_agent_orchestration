@@ -1,16 +1,5 @@
-"""Planner agent that decomposes research topics into actionable sub-tasks.
-
-This module contains:
-
-* **SubtaskSchema / PlannerOutput** — Pydantic V2 models that define the
-  structured JSON contract between the LLM and the rest of the pipeline.
-* **PlannerAgent** — A ReAct-style agent that calls Groq (llama-3.3-70b)
-  up to ``MAX_REACT_ITERATIONS`` times, self-assessing coverage quality
-  and refining subtasks until the score exceeds
-  ``PLANNING_QUALITY_THRESHOLD``.
-
-The agent is invoked by the ``planner_node`` in ``orchestrator/graph.py``
-but has **zero LangGraph imports** — it is pure agent logic.
+"""Planner agent that decomposes research topics into subtasks via a ReAct loop
+calling Groq (llama-3.3-70b) with self-assessed coverage quality.
 """
 
 from __future__ import annotations
@@ -30,18 +19,7 @@ from config.settings import (
 )
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Pydantic V2 schemas
-# ═══════════════════════════════════════════════════════════════════════════
-
-
 class SubtaskSchema(BaseModel):
-    """A single research subtask produced by the Planner.
-
-    Each subtask carries a Tavily-ready ``search_query`` so the downstream
-    Search Agent can execute it without further transformation.
-    """
-
     subtask_id: str = Field(
         ...,
         description='Sequential id, e.g. "subtask_001"',
@@ -71,12 +49,8 @@ class SubtaskSchema(BaseModel):
 
 
 class PlannerOutput(BaseModel):
-    """Complete output of a single Planner ReAct iteration.
-
-    ``coverage_score`` is the LLM's self-assessed quality metric.  If it
-    falls below ``PLANNING_QUALITY_THRESHOLD`` the ReAct loop will run an
-    additional iteration using the identified ``coverage_gaps``.
-    """
+    """coverage_score drives the ReAct loop: if below threshold, coverage_gaps
+    are fed back to the LLM for refinement."""
 
     subtasks: list[SubtaskSchema]
     coverage_score: float = Field(
@@ -96,29 +70,12 @@ class PlannerOutput(BaseModel):
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# PlannerAgent
-# ═══════════════════════════════════════════════════════════════════════════
-
-
 class PlannerAgent:
-    """ReAct-style planner that decomposes a research topic into subtasks.
-
-    The agent loops up to ``max_iterations`` times.  On every iteration it:
-
-    1. **ACT**   — calls the Groq LLM with a structured JSON prompt.
-    2. **THINK** — parses the response through Pydantic validation.
-    3. **OBSERVE** — checks ``coverage_score`` against the threshold.
-       If the score is too low the identified *gaps* are fed back into
-       the next iteration's prompt so the LLM can self-correct.
-    """
+    """ReAct-style planner: loops up to max_iterations, calling the LLM,
+    parsing the response, and checking coverage_score against the threshold.
+    Gaps from low-scoring iterations are fed back for self-correction."""
 
     def __init__(self) -> None:
-        """Initialise the Planner with a ChatGroq LLM and tuning params.
-
-        Reads ``GROQ_API_KEY`` and ``GROQ_MODEL_NAME`` from
-        ``config.settings`` (which in turn loads them from ``.env``).
-        """
         self.llm = ChatGroq(
             api_key=GROQ_API_KEY,
             model=GROQ_MODEL_NAME,
@@ -127,28 +84,15 @@ class PlannerAgent:
         self.max_iterations: int = MAX_REACT_ITERATIONS
         self.quality_threshold: float = PLANNING_QUALITY_THRESHOLD
 
-    # ── public API ────────────────────────────────────────────────────
-
     def run(self, topic: str, research_id: str) -> list[dict[str, Any]]:
-        """Decompose *topic* into a list of subtask dicts via a ReAct loop.
+        """Decompose *topic* into subtask dicts via the ReAct loop.
 
-        This is the single entry-point called by ``planner_node`` in
-        ``orchestrator/graph.py``.
-
-        Args:
-            topic: The user's research topic string.
-            research_id: Unique pipeline run id (for logging / tracing).
-
-        Returns:
-            A ``list[dict]`` of subtasks ready to merge into
-            ``NewsForgeState["subtasks"]`` (converted from Pydantic models
-            so they are plain dicts compatible with LangGraph state).
+        Returns plain dicts (not Pydantic models) for LangGraph state compat.
         """
         previous_gaps: list[str] = []
         best_output: PlannerOutput | None = None
 
         for iteration in range(1, self.max_iterations + 1):
-            # ── ACT: call the LLM ─────────────────────────────────────
             system_prompt = self._build_system_prompt()
             user_prompt = self._build_user_prompt(topic, iteration, previous_gaps)
 
@@ -157,7 +101,6 @@ class PlannerAgent:
                 {"role": "user", "content": user_prompt},
             ])
 
-            # ── THINK: parse + validate ───────────────────────────────
             output = self._parse_llm_response(
                 response.content, iteration
             )
@@ -168,7 +111,6 @@ class PlannerAgent:
                 f"— coverage score: {output.coverage_score:.2f}"
             )
 
-            # ── OBSERVE: good enough? ─────────────────────────────────
             if output.coverage_score >= self.quality_threshold:
                 break
 
@@ -186,18 +128,7 @@ class PlannerAgent:
         )
         return subtask_dicts
 
-    # ── prompt builders ───────────────────────────────────────────────
-
     def _build_system_prompt(self) -> str:
-        """Return the system prompt that forces structured JSON output.
-
-        The prompt instructs the LLM to:
-        - Think about what dimensions of the topic need coverage.
-        - Generate 3-5 subtasks with specific, Tavily-ready search queries.
-        - Self-assess coverage on a 0.0-1.0 scale.
-        - List any gaps it identifies.
-        - Output **only** valid JSON matching the ``PlannerOutput`` schema.
-        """
         return textwrap.dedent("""\
             You are the Planner agent in a multi-agent research system called NewsForge.
 
@@ -246,19 +177,6 @@ class PlannerAgent:
         iteration: int,
         previous_gaps: list[str],
     ) -> str:
-        """Build the user message for a given ReAct iteration.
-
-        Args:
-            topic: The research topic.
-            iteration: Current iteration number (1-based).
-            previous_gaps: Gaps identified in the prior iteration (empty on
-                the first pass).
-
-        Returns:
-            A prompt string.  On iteration 1 it is simply the topic.  On
-            subsequent iterations it includes the gaps so the LLM can
-            self-correct.
-        """
         if iteration == 1 or not previous_gaps:
             return (
                 f"Research topic: {topic}\n\n"
@@ -273,27 +191,11 @@ class PlannerAgent:
             f"Generate subtasks for iteration {iteration}."
         )
 
-    # ── response parsing ──────────────────────────────────────────────
-
     def _parse_llm_response(
         self,
         response: str,
         iteration: int,
     ) -> PlannerOutput:
-        """Parse and validate the raw LLM string into a ``PlannerOutput``.
-
-        Args:
-            response: The raw text content returned by the LLM.
-            iteration: The current iteration (used to override the
-                ``iteration`` field if the LLM gets it wrong).
-
-        Returns:
-            A validated ``PlannerOutput`` instance.
-
-        Raises:
-            ValueError: If the response is not valid JSON or fails Pydantic
-                validation, with a message showing what went wrong.
-        """
         # Strip markdown fences if the LLM wraps its output despite instructions
         cleaned = response.strip()
         if cleaned.startswith("```"):
@@ -322,10 +224,6 @@ class PlannerAgent:
                 f"{iteration}: {exc}. Parsed data keys: {list(data.keys())}"
             ) from exc
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Standalone test
-# ═══════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     import pprint

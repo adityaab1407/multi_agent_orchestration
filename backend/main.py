@@ -51,24 +51,8 @@ from backend.schemas import (
 from orchestrator.graph import pipeline
 from orchestrator.state import NewsForgeState
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# In-memory store for active / paused pipeline runs
-# ═══════════════════════════════════════════════════════════════════════════
-#
-# Maps research_id → metadata dict.  This is sufficient for a portfolio
-# project; a production system would use Redis or the DB.
-#
-# Keys stored per run:
-#   thread_id, topic, status, report_preview, quality_score,
-#   word_count, revision_count, created_at
-
 active_runs: dict[str, dict[str, Any]] = {}
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# App lifecycle
-# ═══════════════════════════════════════════════════════════════════════════
 
 
 @asynccontextmanager
@@ -77,10 +61,6 @@ async def lifespan(app: FastAPI):
     print("NewsForge API started — docs at http://localhost:8000/docs")
     yield
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# FastAPI app
-# ═══════════════════════════════════════════════════════════════════════════
 
 app = FastAPI(
     title="NewsForge Multi-Agent Research API",
@@ -100,10 +80,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Endpoints
-# ═══════════════════════════════════════════════════════════════════════════
 
 
 @app.post("/research", response_model=ResearchResponse)
@@ -130,7 +106,6 @@ async def run_research(request: ResearchRequest) -> ResearchResponse:
         "search_results": [],
         "scraped_content": [],
         "analysis": None,
-        "visuals": [],
         "draft_report": None,
         "critic_feedback": None,
         "revision_count": 0,
@@ -371,10 +346,6 @@ async def root() -> dict[str, str]:
         "health": "/health",
     }
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Helpers
-# ═══════════════════════════════════════════════════════════════════════════
 
 
 def _get_active_run(research_id: str) -> dict[str, Any]:

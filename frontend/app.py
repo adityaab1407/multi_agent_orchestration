@@ -1,40 +1,4 @@
-"""NewsForge — Streamlit frontend for the 7-agent LangGraph research pipeline.
-
-Design decisions and interview talking points:
-─────────────────────────────────────────────────────────────────────────────
-
-1. PIPELINE VISUALIZER as the centrepiece.  Each agent is a card in a
-   horizontal flow.  Arrows between cards carry the state-field name that
-   flows between agents (e.g. "subtasks[]", "search_results[]").  This
-   makes the LangGraph state graph tangible to non-technical viewers.
-
-2. STATUS PROGRESSION.  Cards start grey ("waiting"), turn blue while
-   running, green on success, red on failure.  Streamlit rerenders the
-   whole page on each interaction, so we colour-code from the result
-   dict after the pipeline returns.
-
-3. REVISION LOOP.  If revision_count > 0 we render a visible "loop"
-   indicator between Critic and Writer showing each round's score delta.
-   This is the most impressive feature — it demonstrates self-improving
-   AI.
-
-4. HITL MOMENT.  When status == "awaiting_approval" a distinct amber
-   panel appears with the report preview, quality score, and two large
-   Approve / Reject buttons.  The visual contrast signals "human action
-   required" and differentiates this from the automated steps.
-
-5. REPORT as payoff.  The full markdown report is rendered beautifully
-   with metadata badges (word count, quality score, revisions) and a
-   download button.  After watching 7 agents work, seeing the polished
-   output feels earned.
-
-6. ANALYSIS DEEP DIVE.  Collapsible section with theme cards, confidence
-   bars, contradictions, and coverage gaps.  Default closed so the page
-   isn't overwhelming, but available for those who want the detail.
-
-Tech: Streamlit + custom HTML/CSS via st.markdown(unsafe_allow_html=True).
-Backend: FastAPI at http://localhost:8080.
-"""
+"""NewsForge Streamlit frontend for the research pipeline."""
 
 import sys
 from pathlib import Path
@@ -48,12 +12,7 @@ from typing import Any, Optional
 import requests
 import streamlit as st
 
-# ─── Backend URL ──────────────────────────────────────────────────────────
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8080")
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Page config
-# ═══════════════════════════════════════════════════════════════════════════
 
 st.set_page_config(
     page_title="NewsForge — AI Research Pipeline",
@@ -61,10 +20,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
     page_icon="🔬",
 )
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Session state defaults
-# ═══════════════════════════════════════════════════════════════════════════
 
 _DEFAULTS = {
     "results": None,
@@ -79,10 +34,6 @@ _DEFAULTS = {
 for key, default in _DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = default
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Global CSS
-# ═══════════════════════════════════════════════════════════════════════════
 
 st.markdown("""
 <style>
@@ -163,10 +114,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Helper functions
-# ═══════════════════════════════════════════════════════════════════════════
 
 
 def _score_color(score: float) -> str:
@@ -281,10 +228,6 @@ def _agent_metric(agent_key: str, results: Optional[dict]) -> str:
     return ""
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 1 — Header
-# ═══════════════════════════════════════════════════════════════════════════
-
 st.markdown("# 🔬 NewsForge")
 st.markdown(
     "<p style='color:#9ca3af; margin-top:-10px; font-size:1.05rem;'>"
@@ -293,10 +236,6 @@ st.markdown(
     "</p>",
     unsafe_allow_html=True,
 )
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 2 — Input
-# ═══════════════════════════════════════════════════════════════════════════
 
 col_input, col_btn = st.columns([5, 1])
 with col_input:
@@ -355,14 +294,8 @@ if run_clicked:
 
         st.session_state.is_loading = False
 
-# ── Error display ─────────────────────────────────────────────────────────
-
 if st.session_state.error:
     st.error(st.session_state.error)
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 3 — Pipeline Execution Visualizer
-# ═══════════════════════════════════════════════════════════════════════════
 
 results: Optional[dict] = st.session_state.results
 
@@ -416,8 +349,6 @@ for i, (key, icon, name) in enumerate(AGENTS):
 flow_html += '</div>'
 st.markdown(flow_html, unsafe_allow_html=True)
 
-# ── Revision loop indicator ───────────────────────────────────────────────
-
 if results and results.get("revision_count", 0) > 0:
     rev_count = results["revision_count"]
     cf = results.get("critic_feedback")
@@ -440,10 +371,6 @@ if results and results.get("revision_count", 0) > 0:
         )
     rev_html += '</div>'
     st.markdown(rev_html, unsafe_allow_html=True)
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 3b — Summary Metrics (after pipeline completes)
-# ═══════════════════════════════════════════════════════════════════════════
 
 if results is not None:
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -500,10 +427,6 @@ if results is not None:
         with st.expander(f"Pipeline Errors ({len(errors)})", expanded=False):
             for err in errors:
                 st.warning(err)
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 4 — Human-in-the-Loop Review
-# ═══════════════════════════════════════════════════════════════════════════
 
 if st.session_state.awaiting_approval and results:
     research_id = st.session_state.research_id
@@ -599,10 +522,6 @@ if st.session_state.awaiting_approval and results:
                 except Exception as e:
                     st.session_state.error = f"Reject failed: {e}"
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 5 — Research Report
-# ═══════════════════════════════════════════════════════════════════════════
-
 if results and results.get("draft_report") and not st.session_state.awaiting_approval:
     draft = results["draft_report"]
     cf = results.get("critic_feedback") or {}
@@ -648,10 +567,6 @@ if results and results.get("draft_report") and not st.session_state.awaiting_app
         file_name=f"newsforge_report_{results.get('research_id', 'report')}.md",
         mime="text/markdown",
     )
-
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 6 — Analysis Deep Dive
-# ═══════════════════════════════════════════════════════════════════════════
 
 if results and results.get("analysis"):
     analysis = results["analysis"]
@@ -714,10 +629,6 @@ if results and results.get("analysis"):
             f"Overall confidence: **{conf:.2f}**"
         )
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SECTION 7 — Architecture (collapsible)
-# ═══════════════════════════════════════════════════════════════════════════
-
 with st.expander("🏗️ Architecture & Tech Stack", expanded=False):
     col_flow, col_stack = st.columns(2)
 
@@ -762,10 +673,6 @@ Final Report
 | Frontend | Streamlit |
 | Storage | Local + optional AWS S3/DynamoDB |
 """)
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Footer
-# ═══════════════════════════════════════════════════════════════════════════
 
 st.markdown("---")
 st.markdown(

@@ -1,52 +1,14 @@
-"""
-orchestrator/checkpointer.py
-
-SQLite-backed checkpointer for LangGraph state persistence.
-
-Compatible with LangGraph >= 0.2.0 (uses langgraph-checkpoint-sqlite).
-
-This enables resume capability — if the pipeline crashes mid-run, it restarts
-from the last completed node, not from scratch.
-
-HOW IT WORKS:
-    LangGraph's SqliteSaver serialises the full state dict after every node
-    execution and writes it to a local SQLite database keyed by (thread_id,
-    checkpoint_id).  When the graph is invoked again with the same thread_id,
-    it reads the latest checkpoint and resumes from where it left off.
-
-WHY IT MATTERS:
-    - Long research pipelines (7 agents) can take minutes.  Without
-      checkpointing, any transient failure (rate-limit, network blip) means
-      rerunning the entire pipeline.
-    - With checkpointing, only the failed node and its successors are
-      re-executed.
-    - It also enables "pause / resume" workflows where a human reviewer can
-      inspect intermediate state before continuing.
-
-NOTE:
-    ``SqliteSaver.from_conn_string()`` returns a context-manager in recent
-    versions of langgraph-checkpoint-sqlite, which is incompatible with the
-    ``compile(checkpointer=...)`` API (it expects a bare instance).  We
-    therefore open a raw ``sqlite3.Connection`` and pass it directly to
-    ``SqliteSaver(conn=...)``.
-"""
+"""SQLite-backed checkpointer for LangGraph state persistence."""
 
 import sqlite3
 from pathlib import Path
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
 _DB_DIR = Path(__file__).resolve().parent.parent / "data"
 _DB_PATH = _DB_DIR / "newsforge_checkpoints.db"
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 def get_checkpointer() -> SqliteSaver:
     """Return a configured SqliteSaver instance backed by a local SQLite file.

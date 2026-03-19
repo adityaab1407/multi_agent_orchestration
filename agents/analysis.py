@@ -1,16 +1,6 @@
 """Analysis agent that extracts themes, facts, and contradictions from scraped content.
 
-Reads:  state["scraped_content"]  ->  list[ScrapedContent]
-        state["subtasks"]         ->  list[Subtask]
-Writes: state["analysis"]         ->  AnalysisOutput dict
-
-ReAct pattern (mirrors PlannerAgent exactly):
-  ACT     — call Groq LLM with a condensed source corpus
-  THINK   — parse + validate the JSON response through Pydantic
-  OBSERVE — check confidence_score against threshold; if too low, pass
-            coverage_notes into the next iteration as targeted focus areas.
-
-The highest-confidence output across all iterations is returned.
+Uses a ReAct loop: ACT (call LLM) -> THINK (parse/validate) -> OBSERVE (check confidence).
 """
 
 from __future__ import annotations
@@ -36,38 +26,24 @@ from config.settings import (
 )
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Config
-# ═══════════════════════════════════════════════════════════════════════════
-
-
 @dataclass
 class AnalysisConfig:
-    """Tuneable knobs for the AnalysisAgent."""
-
     temperature: float = 0.2
     max_iterations: int = MAX_REACT_ITERATIONS
     quality_threshold: float = PLANNING_QUALITY_THRESHOLD
-    # llama-3.3-70b-versatile has a 128K context window;
-    # 20 000 chars ≈ 5 000 tokens — leaves ample room for the JSON reply.
+    # 20 000 chars ~ 5 000 tokens — leaves ample room for the JSON reply
+    # within llama-3.3-70b-versatile's 128K context window.
     max_content_chars: int = 20_000
     max_chars_per_article: int = 2_000
     max_themes: int = 8
     max_key_facts: int = 15
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Pydantic V2 schema
-# ═══════════════════════════════════════════════════════════════════════════
-
-
 class AnalysisIterationOutput(BaseModel):
     """Structured output of a single AnalysisAgent ReAct iteration.
 
-    ``confidence_score`` is the LLM's honest self-assessment of how well the
-    source corpus covers the research topic.  If it falls below
-    ``quality_threshold``, the loop runs another pass using the identified
-    ``coverage_notes`` as targeted focus areas for self-correction.
+    If ``confidence_score`` falls below ``quality_threshold``, the loop
+    runs another pass using ``coverage_notes`` as targeted focus areas.
     """
 
     themes: list[str] = Field(
@@ -99,37 +75,14 @@ class AnalysisIterationOutput(BaseModel):
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# AnalysisAgent
-# ═══════════════════════════════════════════════════════════════════════════
-
-
 class AnalysisAgent:
     """ReAct-style agent that extracts structured insights from scraped articles.
 
-    The agent loops up to ``max_iterations`` times.  On every iteration it:
-
-    1. **ACT**     — call the Groq LLM with a condensed source corpus.
-    2. **THINK**   — parse + Pydantic-validate the JSON response.
-    3. **OBSERVE** — compare ``confidence_score`` against ``quality_threshold``.
-                     If the score is too low, ``coverage_notes`` from this pass
-                     feed into the next prompt so the LLM can self-correct.
-
-    Per-iteration errors are caught and logged; the loop continues to the next
-    attempt.  The highest-confidence output across all iterations is returned.
-    If every iteration fails, a minimal fallback dict is returned so the
-    pipeline never crashes.
+    Loops up to ``max_iterations`` times, keeping the highest-confidence output.
+    Returns a minimal fallback dict if every iteration fails.
     """
 
     def __init__(self, config: AnalysisConfig | None = None) -> None:
-        """Initialise with a ChatGroq LLM instance and AnalysisConfig.
-
-        Reads ``GROQ_API_KEY`` and ``GROQ_MODEL_NAME`` from
-        ``config.settings`` (loaded from ``.env``).
-
-        Args:
-            config: Optional AnalysisConfig; sensible defaults are used if omitted.
-        """
         self.config = config or AnalysisConfig()
         self.llm = ChatGroq(
             api_key=GROQ_API_KEY,
@@ -137,30 +90,12 @@ class AnalysisAgent:
             temperature=self.config.temperature,
         )
 
-    # ── public API ─────────────────────────────────────────────────────────
-
     def run(
         self,
         scraped_content: list[dict[str, Any]],
         subtasks: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Analyse *scraped_content* and return a structured AnalysisOutput dict.
-
-        This is the single entry-point called by ``analysis_node`` in
-        ``orchestrator/graph.py``.
-
-        Args:
-            scraped_content: List of ScrapedContent dicts from the Scraper Agent.
-                Items with ``scrape_status == "success"`` are prioritised;
-                failed/blocked/paywall items are excluded from the corpus.
-            subtasks: Original Subtask dicts from the Planner, used to add
-                research-topic context to the corpus header.
-
-        Returns:
-            A ``dict`` with keys: ``themes``, ``key_facts``, ``contradictions``,
-            ``confidence_score``, ``coverage_notes``, ``iteration`` — ready to
-            be stored as ``NewsForgeState["analysis"]``.
-        """
+        """Analyse *scraped_content* and return a structured AnalysisOutput dict."""
         corpus = self._build_corpus(scraped_content, subtasks)
         usable = sum(
             1 for item in scraped_content
@@ -177,7 +112,6 @@ class AnalysisAgent:
 
         for iteration in range(1, self.config.max_iterations + 1):
 
-            # ── ACT: call the LLM ─────────────────────────────────────────
             user_prompt = self._build_user_prompt(corpus, iteration, previous_notes)
 
             try:
@@ -186,14 +120,12 @@ class AnalysisAgent:
                     {"role": "user", "content": user_prompt},
                 ])
 
-                # ── THINK: parse + validate ───────────────────────────────
                 output = self._parse_llm_response(response.content, iteration)
 
             except Exception as exc:
                 print(f"[Analysis] Iteration {iteration} failed: {exc}")
                 continue
 
-            # Track the highest-confidence output across all iterations
             if best_output is None or output.confidence_score > best_output.confidence_score:
                 best_output = output
 
@@ -205,7 +137,6 @@ class AnalysisAgent:
                 f"| contradictions: {len(output.contradictions)}"
             )
 
-            # ── OBSERVE: quality gate ─────────────────────────────────────
             if output.confidence_score >= self.config.quality_threshold:
                 print(
                     f"[Analysis OBSERVE] Confidence {output.confidence_score:.2f} "
@@ -231,8 +162,6 @@ class AnalysisAgent:
         )
         return best_output.model_dump()
 
-    # ── corpus builder ─────────────────────────────────────────────────────
-
     def _build_corpus(
         self,
         scraped_content: list[dict[str, Any]],
@@ -240,31 +169,17 @@ class AnalysisAgent:
     ) -> str:
         """Condense scraped articles into a single text corpus for the LLM.
 
-        Ordering strategy:
-        1. Filter to ``scrape_status in ("success", "too_short")``.
-        2. Sort: ``"success"`` before ``"too_short"`` so richest content leads.
-        3. Per article: include title, domain, status/word-count header, then
-           up to ``max_chars_per_article`` characters of ``raw_text``.
-        4. Stop appending once total corpus exceeds ``max_content_chars`` and
-           note how many sources were truncated.
-
-        Args:
-            scraped_content: List of ScrapedContent dicts.
-            subtasks: List of Subtask dicts (added as a topic-context header).
-
-        Returns:
-            A single corpus string ready to embed in a user prompt.
+        Sorts "success" before "too_short" so richest content leads.
+        Stops appending once total corpus exceeds ``max_content_chars``.
         """
         parts: list[str] = []
 
-        # ── Subtask context header ────────────────────────────────────────
         if subtasks:
             parts.append("RESEARCH SUBTASKS (for context):")
             for st in subtasks:
                 parts.append(f"  • {st.get('title', '(untitled)')}")
             parts.append("")
 
-        # ── Filter + sort usable content ──────────────────────────────────
         _PRIORITY: dict[str, int] = {"success": 0, "too_short": 1}
         usable = [
             item for item in scraped_content
@@ -319,17 +234,7 @@ class AnalysisAgent:
 
         return "\n".join(parts)
 
-    # ── prompt builders ────────────────────────────────────────────────────
-
     def _build_system_prompt(self) -> str:
-        """Return the system prompt that forces structured JSON output.
-
-        Instructs the LLM to:
-        - Extract themes, key facts with source attribution, and contradictions.
-        - Self-assess confidence honestly on a 0.0-1.0 scale.
-        - List coverage notes (gaps) to guide refinement if score is low.
-        - Output **only** valid JSON matching the ``AnalysisIterationOutput`` schema.
-        """
         return textwrap.dedent(f"""\
             You are the Analysis Agent in a multi-agent research system called NewsForge.
 
@@ -384,18 +289,8 @@ class AnalysisAgent:
     ) -> str:
         """Build the user message for a given ReAct iteration.
 
-        On the first iteration the prompt contains only the source corpus.
         On subsequent iterations, ``previous_notes`` (coverage gaps from the
         prior pass) are prepended so the LLM can self-correct.
-
-        Args:
-            corpus: The condensed source text corpus from ``_build_corpus``.
-            iteration: Current iteration number (1-based).
-            previous_notes: Coverage gaps identified in the prior iteration
-                (empty list on the first pass).
-
-        Returns:
-            A prompt string ready to send to the LLM.
         """
         if iteration == 1 or not previous_notes:
             return (
@@ -413,8 +308,6 @@ class AnalysisAgent:
             f"Generate improved analysis for iteration {iteration}."
         )
 
-    # ── response parsing ───────────────────────────────────────────────────
-
     def _parse_llm_response(
         self,
         response: str,
@@ -423,23 +316,10 @@ class AnalysisAgent:
         """Parse and validate the raw LLM string into an ``AnalysisIterationOutput``.
 
         Strips markdown fences defensively (the LLM sometimes wraps JSON in
-        ``` blocks despite instructions).  The ``iteration`` field is always
-        overridden with the caller's value so it is authoritative.
-
-        Args:
-            response: The raw text content returned by the Groq LLM.
-            iteration: The current iteration number (1-based).
-
-        Returns:
-            A validated ``AnalysisIterationOutput`` instance.
-
-        Raises:
-            ValueError: If the response is not valid JSON or fails Pydantic
-                validation, with a message showing the raw response excerpt.
+        ``` blocks despite instructions).
         """
         cleaned = response.strip()
 
-        # Strip markdown fences if the LLM wraps its output despite instructions
         if cleaned.startswith("```"):
             cleaned = cleaned.split("\n", 1)[-1]
         if cleaned.endswith("```"):
@@ -467,18 +347,8 @@ class AnalysisAgent:
                 f"Parsed data keys: {list(data.keys())}"
             ) from exc
 
-    # ── fallback ───────────────────────────────────────────────────────────
-
     def _make_fallback_output(self) -> AnalysisIterationOutput:
-        """Return a minimal valid output when every LLM iteration fails.
-
-        Ensures the pipeline never crashes due to Analysis Agent failures.
-        Downstream agents (Writer, Critic) will see ``confidence_score=0.0``
-        and can handle this gracefully.
-
-        Returns:
-            An ``AnalysisIterationOutput`` with empty fields and zero confidence.
-        """
+        """Return a minimal valid output when every LLM iteration fails."""
         return AnalysisIterationOutput(
             themes=["Analysis unavailable — all LLM iterations failed"],
             key_facts=[],
@@ -488,10 +358,6 @@ class AnalysisAgent:
             iteration=1,
         )
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Standalone smoke-test
-# ═══════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     import pprint

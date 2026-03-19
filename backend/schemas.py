@@ -16,10 +16,6 @@ from typing import Optional
 from pydantic import BaseModel, Field, field_validator
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Request schemas
-# ═══════════════════════════════════════════════════════════════════════════
-
 
 class ResearchRequest(BaseModel):
     """Incoming request to start a new research pipeline run.
@@ -50,10 +46,6 @@ class ResearchRequest(BaseModel):
         return self.research_id or str(uuid.uuid4())
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Nested response models
-# ═══════════════════════════════════════════════════════════════════════════
-
 
 class SubtaskResponse(BaseModel):
     """A single subtask produced by the Planner agent."""
@@ -77,10 +69,6 @@ class SearchResultResponse(BaseModel):
     relevance_score: float
     source_domain: str
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Top-level response schemas
-# ═══════════════════════════════════════════════════════════════════════════
 
 
 class CriticFeedbackResponse(BaseModel):
@@ -140,11 +128,11 @@ class HealthResponse(BaseModel):
     status: str = Field(default="healthy")
     version: str = Field(default="1.0.0")
     agents_live: list[str] = Field(
-        default=["planner", "search"],
+        default=["planner", "search", "scraper", "analysis", "writer", "critic", "publisher"],
         description="Agents with working implementations",
     )
     agents_pending: list[str] = Field(
-        default=["scraper", "analysis", "visual", "writer", "critic"],
+        default=[],
         description="Agents still in stub / coming-soon state",
     )
 
@@ -168,10 +156,6 @@ class PipelineStatusResponse(BaseModel):
     pipeline_version: str = Field(default="1.0.0")
     agents: list[AgentStatus]
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Human-in-the-Loop (HITL) schemas
-# ═══════════════════════════════════════════════════════════════════════════
 
 
 class ReviewRequest(BaseModel):

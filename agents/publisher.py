@@ -1,12 +1,5 @@
-"""Publisher agent that saves final reports locally and optionally to AWS (S3 + DynamoDB).
-
-State contract:
-    Reads:  state["draft_report"]       ->  str
-            state["critic_feedback"]    ->  CriticFeedback
-            state["topic"]              ->  str
-            state["research_id"]        ->  str
-    Writes: state["published_url"]      ->  str   (local path or S3 URL)
-            state["published_record_id"] ->  str  (DynamoDB record id or local metadata path)
+"""Publisher agent that saves final reports locally and optionally to AWS
+(S3 + DynamoDB).
 """
 
 from __future__ import annotations
@@ -34,11 +27,6 @@ from config.settings import (
 logger = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Schemas
-# ═══════════════════════════════════════════════════════════════════════════
-
-
 class PublisherConfig(BaseModel):
     """Tuneable knobs for the Publisher Agent."""
 
@@ -47,8 +35,6 @@ class PublisherConfig(BaseModel):
 
 
 class PublisherOutputSchema(BaseModel):
-    """Structured output of a publish operation."""
-
     local_report_path: str = Field(description="Local file path to the saved .md report")
     local_metadata_path: str = Field(description="Local file path to the metadata JSON")
     s3_url: str | None = Field(default=None, description="S3 object URL if uploaded")
@@ -57,18 +43,12 @@ class PublisherOutputSchema(BaseModel):
     aws_enabled: bool = Field(description="Whether AWS publishing was attempted")
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Agent
-# ═══════════════════════════════════════════════════════════════════════════
-
-
 class PublisherAgent:
     """Saves final research reports locally and optionally to AWS S3 + DynamoDB.
 
-    Local save always happens.  AWS upload is attempted only when all required
-    AWS env vars are set — if any are missing, AWS is silently skipped.
-    If AWS calls fail at runtime, the error is logged and the agent still
-    returns successfully with local paths.
+    Local save always happens. AWS upload is attempted only when all required
+    AWS env vars are set. If AWS calls fail at runtime, the error is logged
+    and the agent still returns successfully with local paths.
     """
 
     def __init__(self, config: PublisherConfig | None = None) -> None:
@@ -81,10 +61,6 @@ class PublisherAgent:
             DYNAMODB_TABLE,
         ])
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def run(
         self,
         research_id: str,
@@ -92,19 +68,10 @@ class PublisherAgent:
         draft_report: str,
         critic_feedback: dict[str, Any],
     ) -> dict[str, Any]:
-        """Publish the final report.
-
-        Always saves locally to ``data/reports/{research_id}.md`` and a
-        companion ``{research_id}_metadata.json``.  Optionally uploads to
-        S3 and writes a DynamoDB record if AWS is configured.
-
-        Returns:
-            dict matching PublisherOutputSchema fields.
-        """
+        """Publish the final report locally and optionally to AWS."""
         published_at = datetime.now(timezone.utc).isoformat()
         slug = self._slugify(topic)
 
-        # --- Local save (always) ---
         report_path, metadata_path = self._save_local(
             research_id=research_id,
             slug=slug,
@@ -117,7 +84,6 @@ class PublisherAgent:
         s3_url: str | None = None
         dynamodb_id: str | None = None
 
-        # --- AWS (optional, graceful degradation) ---
         if self.aws_enabled:
             s3_url = self._upload_to_s3(research_id, slug, draft_report)
             dynamodb_id = self._write_dynamodb_record(
@@ -141,10 +107,6 @@ class PublisherAgent:
 
         return output.model_dump()
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     def _slugify(self, text: str) -> str:
         """Convert topic to a filesystem-safe slug."""
         slug = text.lower().strip()
@@ -162,11 +124,7 @@ class PublisherAgent:
         critic_feedback: dict[str, Any],
         published_at: str,
     ) -> tuple[Path, Path]:
-        """Write the report .md and metadata .json to disk.
-
-        Returns:
-            (report_path, metadata_path)
-        """
+        """Write the report .md and metadata .json to disk."""
         out_dir = Path(self.config.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -198,7 +156,7 @@ class PublisherAgent:
     def _upload_to_s3(
         self, research_id: str, slug: str, draft_report: str
     ) -> str | None:
-        """Upload report to S3.  Returns the S3 URL or None on failure."""
+        """Upload report to S3. Returns the S3 URL or None on failure."""
         try:
             import boto3
 
@@ -233,7 +191,7 @@ class PublisherAgent:
         critic_feedback: dict[str, Any],
         published_at: str,
     ) -> str | None:
-        """Write metadata to DynamoDB.  Returns research_id or None on failure."""
+        """Write metadata to DynamoDB. Returns research_id or None on failure."""
         try:
             import boto3
 
@@ -264,10 +222,6 @@ class PublisherAgent:
             logger.warning("DynamoDB write failed (graceful degradation): %s", e)
             return None
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Quick manual test
-# ═══════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     import uuid

@@ -1,20 +1,6 @@
-"""Search agent that queries Tavily for relevant news and information.
+"""Search agent that queries Tavily for relevant news/information.
 
-This module contains:
-
-* **SearchResultSchema / SearchAgentOutput** — Pydantic V2 models that
-  define the structured contract for search results flowing into the pipeline.
-* **SearchAgent** — A simple tool-use agent (no ReAct loop) that executes
-  one Tavily search per subtask with retry logic and exponential backoff.
-
-Searches run in parallel via ``asyncio.gather`` + ``asyncio.to_thread``
-(the Tavily SDK is synchronous, so each call runs in a thread-pool worker).
-
-# Sequential (old): ~10s for 5 subtasks
-# Parallel  (new):  ~2s for 5 subtasks (5x speedup)
-
-The agent is invoked by ``search_node`` in ``orchestrator/graph.py``
-but has **zero LangGraph imports** — it is pure agent logic.
+Searches run in parallel via asyncio.gather + asyncio.to_thread.
 """
 
 import asyncio
@@ -33,18 +19,7 @@ from tavily import TavilyClient
 from config.settings import SEARCH_RESULTS_PER_QUERY, TAVILY_API_KEY
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Pydantic V2 schemas
-# ═══════════════════════════════════════════════════════════════════════════
-
-
 class SearchResultSchema(BaseModel):
-    """A single search result returned by Tavily for one subtask.
-
-    ``result_id`` is globally unique across all subtask results within a
-    single pipeline run so downstream agents can reference individual sources.
-    """
-
     result_id: str = Field(
         ...,
         description='Globally unique id, e.g. "result_001"',
@@ -78,13 +53,8 @@ class SearchResultSchema(BaseModel):
 
 
 class SearchAgentOutput(BaseModel):
-    """Aggregated output of the SearchAgent across all subtasks.
-
-    ``search_status`` indicates overall health:
-    - ``"complete"`` — every subtask returned results.
-    - ``"partial"``  — some subtasks failed but at least one succeeded.
-    - ``"failed"``   — no subtask returned any results.
-    """
+    """search_status: "complete" (all succeeded), "partial" (some failed),
+    or "failed" (none returned results)."""
 
     results: list[SearchResultSchema]
     total_results: int
@@ -98,51 +68,17 @@ class SearchAgentOutput(BaseModel):
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# SearchAgent
-# ═══════════════════════════════════════════════════════════════════════════
-
-
 class SearchAgent:
-    """Simple tool-use agent that runs one Tavily search per subtask.
-
-    No reasoning loop — each subtask's ``search_query`` is sent directly to
-    the Tavily API.  Retry logic with exponential backoff handles transient
-    failures and rate limits.
-
-    Searches run in parallel via ``run_async`` (asyncio.gather).
-    The synchronous ``run()`` method delegates to ``run_async()`` so that
-    callers (like ``search_node``) need zero changes.
-    """
+    """Runs one Tavily search per subtask with retry/backoff, in parallel."""
 
     def __init__(self) -> None:
-        """Initialise the SearchAgent with a TavilyClient and tuning params.
-
-        Reads ``TAVILY_API_KEY`` and ``SEARCH_RESULTS_PER_QUERY`` from
-        ``config.settings`` (which loads them from ``.env``).
-        """
         self.tavily = TavilyClient(api_key=TAVILY_API_KEY)
         self.max_results: int = SEARCH_RESULTS_PER_QUERY
         self.max_retries: int = 3
         self.retry_delay: float = 1.0  # base delay in seconds
 
-    # ── public API (sync) ──────────────────────────────────────────────
-
     def run(self, subtasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Search Tavily for every subtask and return a flat list of results.
-
-        This is the single entry-point called by ``search_node`` in
-        ``orchestrator/graph.py``.  Internally it delegates to
-        ``run_async()`` for parallel execution.
-
-        Args:
-            subtasks: List of subtask dicts, each containing at least
-                ``subtask_id`` and ``search_query``.
-
-        Returns:
-            A ``list[dict]`` of search results ready to merge into
-            ``NewsForgeState["search_results"]``.
-        """
+        """Search Tavily for every subtask. Delegates to run_async() internally."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -156,22 +92,10 @@ class SearchAgent:
         else:
             return asyncio.run(self.run_async(subtasks))
 
-    # ── public API (async) ─────────────────────────────────────────────
-
     async def run_async(
         self, subtasks: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """Run all subtask searches in parallel via asyncio.gather.
-
-        Each synchronous Tavily call is wrapped with ``asyncio.to_thread``
-        so it executes in a thread-pool worker without blocking the loop.
-
-        Args:
-            subtasks: List of subtask dicts.
-
-        Returns:
-            Flat ``list[dict]`` of search results (same contract as ``run``).
-        """
+        """Run all subtask searches in parallel via asyncio.gather."""
         if not subtasks:
             print("[Search] No subtasks to process.")
             return []
@@ -179,8 +103,7 @@ class SearchAgent:
         print(f"[Search] Running {len(subtasks)} searches in parallel...")
         start = time.time()
 
-        # Build per-subtask result offsets so result_ids are globally unique.
-        # Each subtask gets up to self.max_results ids starting at its offset.
+        # Each subtask gets up to self.max_results ids starting at its offset
         offsets = [i * self.max_results for i in range(len(subtasks))]
 
         tasks = [
@@ -190,7 +113,6 @@ class SearchAgent:
 
         results_nested = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Flatten, handling per-subtask exceptions gracefully
         all_results: list[SearchResultSchema] = []
         failed_subtask_ids: list[str] = []
 
@@ -207,7 +129,6 @@ class SearchAgent:
 
         elapsed = time.time() - start
 
-        # Determine overall status
         if not failed_subtask_ids:
             status = "complete"
         elif all_results:
@@ -222,36 +143,22 @@ class SearchAgent:
 
         return [r.model_dump() for r in all_results]
 
-    # ── async wrapper for per-subtask search ───────────────────────────
-
     async def _search_subtask_async(
         self,
         subtask: dict[str, Any],
         result_offset: int,
     ) -> list[SearchResultSchema]:
-        """Run ``_search_subtask`` in a thread so it doesn't block the loop."""
+        """Run _search_subtask in a thread so it doesn't block the event loop."""
         return await asyncio.to_thread(
             self._search_subtask, subtask, result_offset
         )
-
-    # ── per-subtask search (sync, unchanged) ───────────────────────────
 
     def _search_subtask(
         self,
         subtask: dict[str, Any],
         result_offset: int,
     ) -> list[SearchResultSchema]:
-        """Execute a single Tavily search for one subtask.
-
-        Args:
-            subtask: A subtask dict with ``subtask_id`` and ``search_query``.
-            result_offset: Running counter so ``result_id`` values are
-                globally unique across all subtasks.
-
-        Returns:
-            A list of ``SearchResultSchema`` objects, or an empty list on
-            failure.
-        """
+        """Execute a single Tavily search for one subtask."""
         subtask_id: str = subtask.get("subtask_id", "unknown")
         query: str = subtask.get("search_query", "")
 
@@ -289,26 +196,8 @@ class SearchAgent:
         )
         return results
 
-    # ── Tavily call with retry ─────────────────────────────────────────
-
     def _call_tavily_with_retry(self, query: str) -> list[dict[str, Any]]:
-        """Call Tavily search with exponential backoff retry.
-
-        Retry policy:
-            - Rate-limit errors → wait 60 s, then retry.
-            - Timeout errors → log and retry with normal backoff.
-            - Other errors → log and retry with exponential backoff.
-            - After ``max_retries`` failures, the last exception is raised.
-
-        Args:
-            query: The search query string.
-
-        Returns:
-            A list of raw result dicts from the Tavily response.
-
-        Raises:
-            Exception: If all retry attempts are exhausted.
-        """
+        """Call Tavily with exponential backoff. Rate-limit errors wait 60s."""
         last_exc: Exception | None = None
 
         for attempt in range(1, self.max_retries + 1):
@@ -348,10 +237,6 @@ class SearchAgent:
         raise last_exc  # type: ignore[misc]
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Standalone test
-# ═══════════════════════════════════════════════════════════════════════════
-
 if __name__ == "__main__":
     import pprint
 
@@ -384,7 +269,6 @@ if __name__ == "__main__":
 
     agent = SearchAgent()
 
-    # Time the parallel run
     t0 = time.time()
     results = agent.run(mock_subtasks)
     elapsed = time.time() - t0

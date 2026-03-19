@@ -1,18 +1,5 @@
-"""Critic agent that reviews and scores draft reports for quality and accuracy.
-
-Reads:  state["draft_report"]     ->  str
-        state["analysis"]         ->  AnalysisOutput dict
-        state["subtasks"]         ->  list[Subtask]
-        state["revision_count"]   ->  int
-Writes: state["critic_feedback"]  ->  CriticFeedback dict
-        state["revision_count"]   ->  int (incremented)
-
-Architecture note:
-The Critic uses a single LLM call — not a ReAct loop.  It evaluates the
-report once against a structured rubric and returns pass/fail with scores.
-Unlike Analysis (which refines its own output), the Critic's job is to
-produce a verdict and hand revision responsibility to the Writer.  Adding
-a loop here would just re-score the same unchanged report.
+"""Critic agent that reviews and scores draft reports for quality and accuracy
+using a single LLM call against a structured rubric.
 """
 
 from __future__ import annotations
@@ -32,11 +19,6 @@ from pydantic import BaseModel, Field
 from config.settings import GROQ_API_KEY, GROQ_MODEL_NAME
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Config
-# ═══════════════════════════════════════════════════════════════════════════
-
-# Maximum number of Writer→Critic revision loops allowed.
 MAX_REVISIONS: int = 2
 
 
@@ -45,7 +27,7 @@ class CriticConfig:
     """Tuneable knobs for the CriticAgent."""
 
     temperature: float = 0.2
-    pass_threshold: float = 0.75
+    pass_threshold: float = 0.70
     max_revisions: int = MAX_REVISIONS
     scoring_dimensions: list[str] = field(default_factory=lambda: [
         "factual_accuracy",
@@ -56,29 +38,13 @@ class CriticConfig:
     ])
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Pydantic V2 schemas
-# ═══════════════════════════════════════════════════════════════════════════
-
-
 class DimensionScore(BaseModel):
-    """A single quality dimension score from the Critic LLM."""
-
     dimension: str = Field(..., description="Name of the quality dimension")
     score: float = Field(..., ge=0.0, le=1.0, description="Score from 0.0 to 1.0")
     reasoning: str = Field(..., description="Brief explanation for this score")
 
 
 class CriticOutputSchema(BaseModel):
-    """Structured output of the CriticAgent.
-
-    ``passed``:           Whether the report meets the quality threshold.
-    ``quality_score``:    Weighted average across all dimensions (0.0-1.0).
-    ``dimension_scores``: Per-dimension breakdown with reasoning.
-    ``feedback_notes``:   Specific, actionable revision instructions (empty if passed).
-    ``strengths``:        What the report does well (always populated).
-    """
-
     passed: bool
     quality_score: float = Field(..., ge=0.0, le=1.0)
     dimension_scores: list[DimensionScore]
@@ -86,38 +52,21 @@ class CriticOutputSchema(BaseModel):
     strengths: list[str]
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# CriticAgent
-# ═══════════════════════════════════════════════════════════════════════════
-
-
 class CriticAgent:
     """Reviews a draft report against the original analysis and returns structured feedback.
 
-    The Critic scores the report on multiple quality dimensions (factual accuracy,
-    completeness, coherence, citation quality, readability), computes a weighted
-    average, and decides pass/fail against ``pass_threshold``.
-
-    If the report fails, ``feedback_notes`` contains specific, actionable
-    revision instructions that the Writer can incorporate on the next pass.
+    Scores on multiple quality dimensions, computes a weighted average, and
+    decides pass/fail against ``pass_threshold``. Failed reports get actionable
+    revision instructions for the Writer.
     """
 
     def __init__(self, config: CriticConfig | None = None) -> None:
-        """Initialise with a ChatGroq LLM instance and CriticConfig.
-
-        Uses a low temperature (0.2) for consistent, deterministic scoring.
-
-        Args:
-            config: Optional CriticConfig; sensible defaults are used if omitted.
-        """
         self.config = config or CriticConfig()
         self.llm = ChatGroq(
             api_key=GROQ_API_KEY,
             model=GROQ_MODEL_NAME,
             temperature=self.config.temperature,
         )
-
-    # ── public API ────────────────────────────────────────────────────────
 
     def run(
         self,
@@ -126,19 +75,7 @@ class CriticAgent:
         subtasks: list[dict[str, Any]],
         revision_count: int = 0,
     ) -> dict[str, Any]:
-        """Review a draft report and return a CriticOutputSchema dict.
-
-        Args:
-            draft_report: The full markdown report string from the Writer.
-            analysis: AnalysisOutput dict for fact-checking against.
-            subtasks: Original Planner subtasks for coverage checking.
-            revision_count: How many prior revisions have occurred.
-
-        Returns:
-            A ``dict`` with keys matching ``CriticOutputSchema``, plus the
-            ``passed`` and ``quality_score`` keys that map directly to
-            ``CriticFeedback`` in the state schema.
-        """
+        """Review a draft report and return a CriticOutputSchema dict."""
         print(f"[Critic] Reviewing report (revision {revision_count})...")
 
         system_prompt = self._build_system_prompt()
@@ -153,7 +90,6 @@ class CriticAgent:
 
         output = self._parse_llm_response(response.content)
 
-        # Log verdict
         status = "PASSED" if output.passed else "NEEDS REVISION"
         print(
             f"[Critic] Overall: {output.quality_score:.2f} "
@@ -169,16 +105,7 @@ class CriticAgent:
 
         return output.model_dump()
 
-    # ── prompt builders ───────────────────────────────────────────────────
-
     def _build_system_prompt(self) -> str:
-        """Return the system prompt instructing the LLM to review a research report.
-
-        Defines the scoring rubric, output JSON schema, and grading rules.
-
-        Returns:
-            A system prompt string.
-        """
         dimensions_str = ", ".join(self.config.scoring_dimensions)
 
         return textwrap.dedent(f"""\
@@ -246,29 +173,16 @@ class CriticAgent:
         subtasks: list[dict[str, Any]],
         revision_count: int,
     ) -> str:
-        """Build the user prompt with the report and analysis data for comparison.
-
-        Args:
-            draft_report: The markdown report to review.
-            analysis: AnalysisOutput dict to check facts against.
-            subtasks: Planner subtasks to check coverage against.
-            revision_count: Current revision number for context.
-
-        Returns:
-            A user prompt string.
-        """
         parts: list[str] = []
 
         parts.append(f"REVISION NUMBER: {revision_count}")
         parts.append("")
 
-        # Subtask coverage checklist
         parts.append("RESEARCH SUBTASKS (check all are covered):")
         for st in subtasks:
             parts.append(f"  - {st.get('title', 'Untitled')}")
         parts.append("")
 
-        # Analysis themes to verify
         themes = analysis.get("themes", [])
         parts.append("ANALYSIS THEMES (verify each is addressed):")
         for theme in themes:
@@ -278,14 +192,12 @@ class CriticAgent:
                 parts.append(f"  - {theme}")
         parts.append("")
 
-        # Key facts for fact-checking
         key_facts = analysis.get("key_facts", [])
         parts.append("KEY FACTS TO VERIFY IN REPORT:")
         for fact in key_facts[:15]:
             parts.append(f"  - {fact}")
         parts.append("")
 
-        # Contradictions that should be discussed
         contradictions = analysis.get("contradictions", [])
         parts.append("CONTRADICTIONS (should appear in Points of Debate):")
         if contradictions:
@@ -309,7 +221,6 @@ class CriticAgent:
         )
         parts.append("")
 
-        # The actual report to review
         parts.append("=" * 60)
         parts.append("DRAFT REPORT TO REVIEW:")
         parts.append("=" * 60)
@@ -320,26 +231,14 @@ class CriticAgent:
 
         return "\n".join(parts)
 
-    # ── response parsing ──────────────────────────────────────────────────
-
     def _parse_llm_response(self, response: str) -> CriticOutputSchema:
-        """Parse and validate the raw LLM JSON response into a CriticOutputSchema.
+        """Parse and validate the raw LLM JSON response.
 
-        Handles markdown fence stripping and enforces consistency between
-        ``quality_score``, ``passed``, and the dimension scores.
-
-        Args:
-            response: Raw text content returned by the Groq LLM.
-
-        Returns:
-            A validated ``CriticOutputSchema`` instance.
-
-        Raises:
-            ValueError: If the response is not valid JSON or fails validation.
+        Recomputes quality_score as the mean of dimension scores and enforces
+        pass/fail consistency with the threshold.
         """
         cleaned = response.strip()
 
-        # Strip markdown fences
         if cleaned.startswith("```"):
             cleaned = cleaned.split("\n", 1)[-1]
         if cleaned.endswith("```"):
@@ -361,11 +260,9 @@ class CriticAgent:
             avg = sum(d.get("score", 0.0) for d in dim_scores) / len(dim_scores)
             data["quality_score"] = round(avg, 3)
 
-        # Enforce passed consistency with threshold (guard against missing key)
         quality = data.get("quality_score", 0.0)
         data["passed"] = quality >= self.config.pass_threshold
 
-        # Ensure feedback_notes is empty when passed
         if data["passed"]:
             data["feedback_notes"] = data.get("feedback_notes", [])[:0]
 
@@ -377,17 +274,11 @@ class CriticAgent:
                 f"Parsed data keys: {list(data.keys())}"
             ) from exc
 
-    # ── fallback ──────────────────────────────────────────────────────────
-
     def make_fallback_output(self) -> CriticOutputSchema:
         """Return a minimal passing output when the LLM call fails.
 
-        The fallback passes the report through to avoid blocking the pipeline.
-        This is a deliberate design choice: if we can't evaluate quality,
-        it's better to publish a potentially imperfect report than to crash.
-
-        Returns:
-            A ``CriticOutputSchema`` that passes with a note about the failure.
+        Passes the report through to avoid blocking the pipeline -- better to
+        publish a potentially imperfect report than to crash.
         """
         return CriticOutputSchema(
             passed=True,
@@ -397,10 +288,6 @@ class CriticAgent:
             strengths=["Critic evaluation failed — passing report through"],
         )
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Standalone smoke-test
-# ═══════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     sample_report = """\

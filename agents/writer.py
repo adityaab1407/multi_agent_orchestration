@@ -1,16 +1,5 @@
-"""Writer agent that composes a polished research report from analysis output.
-
-Reads:  state["topic"]          ->  str
-        state["analysis"]       ->  AnalysisOutput dict
-        state["search_results"] ->  list[SearchResult]
-        state["subtasks"]       ->  list[Subtask]
-Writes: state["draft_report"]   ->  str (full markdown report)
-
-Architecture note:
-Writer does NOT use a ReAct loop.  Planner and Analysis use ReAct because
-they evaluate their own output quality and refine iteratively.  Writer's
-job is formatting already-validated analysis into a report — a single
-well-constructed prompt produces a good result without iteration.
+"""Writer agent that composes a polished research report from analysis output
+via a single LLM call (no ReAct loop).
 """
 
 from __future__ import annotations
@@ -29,22 +18,7 @@ from pydantic import BaseModel
 from config.settings import GROQ_API_KEY, GROQ_MODEL_NAME
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Pydantic V2 schema
-# ═══════════════════════════════════════════════════════════════════════════
-
-
 class WriterOutputSchema(BaseModel):
-    """Structured output of the WriterAgent.
-
-    ``title``:              Report title extracted from the first ``#`` heading.
-    ``executive_summary``:  First paragraph after the ``## Executive Summary`` heading.
-    ``full_report``:        Complete markdown report text.
-    ``word_count``:         Total word count of ``full_report``.
-    ``section_count``:      Number of ``##`` headings in ``full_report``.
-    ``citations``:          Numbered reference list (``["1. Title — URL", ...]``).
-    """
-
     title: str
     executive_summary: str
     full_report: str
@@ -53,32 +27,18 @@ class WriterOutputSchema(BaseModel):
     citations: list[str]
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# WriterAgent
-# ═══════════════════════════════════════════════════════════════════════════
-
-
 class WriterAgent:
     """Composes a structured research report from analysis output via a single LLM call.
 
-    The agent does not use a ReAct loop — the analysis has already been validated
-    by the Analysis Agent.  A single, well-constructed prompt with all themes,
-    facts, contradictions, and citations produces a publication-quality report.
+    No ReAct loop — the analysis has already been validated by the Analysis Agent.
     """
 
     def __init__(self) -> None:
-        """Initialise with a ChatGroq LLM instance.
-
-        Reads ``GROQ_API_KEY`` and ``GROQ_MODEL_NAME`` from
-        ``config.settings`` (loaded from ``.env``).
-        """
         self.llm = ChatGroq(
             api_key=GROQ_API_KEY,
             model=GROQ_MODEL_NAME,
             temperature=0.5,
         )
-
-    # ── public API ────────────────────────────────────────────────────────
 
     def run(
         self,
@@ -90,26 +50,8 @@ class WriterAgent:
     ) -> dict[str, Any]:
         """Generate a complete research report and return a WriterOutputSchema dict.
 
-        Steps:
-        1. Build a deduplicated numbered citation list from ``search_results``.
-        2. Construct system + user prompts with all analysis data.
-        3. If ``feedback_notes`` is provided (revision pass), append them to the
-           user prompt so the LLM knows what to fix.
-        4. Single LLM call to generate the full markdown report.
-        5. Strip accidental backtick fences from LLM output.
-        6. Extract title, executive summary, and section count from markdown.
-
-        Args:
-            topic: The research topic string.
-            analysis: AnalysisOutput dict from the Analysis Agent.
-            search_results: List of SearchResult dicts from the Search Agent.
-            subtasks: List of Subtask dicts from the Planner Agent.
-            feedback_notes: Optional list of revision instructions from the Critic.
-                When provided, the Writer is in revision mode and will incorporate
-                this feedback into the rewritten report.
-
-        Returns:
-            A ``dict`` with keys matching ``WriterOutputSchema``.
+        When ``feedback_notes`` is provided (revision pass), they are appended
+        to the prompt so the LLM knows what to fix.
         """
         if feedback_notes:
             print(f"[Writer] Revising report for: {topic!r} "
@@ -117,26 +59,21 @@ class WriterAgent:
         else:
             print(f"[Writer] Generating report for: {topic!r}")
 
-        # 1. Build citations
         citations = self._format_citations(search_results)
 
-        # 2. Build prompts
         system_prompt = self._build_system_prompt()
         user_prompt = self._build_user_prompt(
             topic, analysis, citations, subtasks, feedback_notes,
         )
 
-        # 3. Single LLM call
         response = self.llm.invoke([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ])
 
-        # 4. Extract and clean markdown
         markdown = response.content.strip()
         markdown = self._strip_markdown_fences(markdown)
 
-        # 5. Build output schema
         title = self._extract_title(markdown)
         executive_summary = self._extract_executive_summary(markdown)
         word_count = len(markdown.split())
@@ -154,16 +91,7 @@ class WriterAgent:
         print(f"[Writer] Done — {word_count} words, {section_count} sections")
         return schema.model_dump()
 
-    # ── prompt builders ───────────────────────────────────────────────────
-
     def _build_system_prompt(self) -> str:
-        """Return the system prompt instructing the LLM to write a research report.
-
-        Specifies the exact section order, citation format, tone, and constraints.
-
-        Returns:
-            A system prompt string.
-        """
         return textwrap.dedent("""\
             You are a professional research report writer for the NewsForge
             multi-agent research pipeline.
@@ -212,27 +140,11 @@ class WriterAgent:
     ) -> str:
         """Build the user prompt containing all research data for the LLM.
 
-        Includes the topic, subtask angles, themes with confidence and facts,
-        contradictions, key facts, confidence score, coverage gaps, and the
-        numbered citation list.
-
-        When ``feedback_notes`` is provided (revision pass), a REVISION
-        INSTRUCTIONS section is prepended so the LLM knows exactly what
-        to fix in the rewritten report.
-
-        Args:
-            topic: The research topic string.
-            analysis: AnalysisOutput dict from the Analysis Agent.
-            citations: Numbered citation list from ``_format_citations``.
-            subtasks: List of Subtask dicts from the Planner Agent.
-            feedback_notes: Optional list of revision instructions from the Critic.
-
-        Returns:
-            A user prompt string.
+        When ``feedback_notes`` is provided, a REVISION INSTRUCTIONS section
+        is prepended so the LLM knows what to fix.
         """
         parts: list[str] = []
 
-        # Revision feedback (if this is a revision pass)
         if feedback_notes:
             parts.append("⚠ REVISION INSTRUCTIONS (from quality review):")
             parts.append("The previous draft was reviewed and needs improvement.")
@@ -244,11 +156,9 @@ class WriterAgent:
             parts.append("Do not just patch — produce a polished final version.")
             parts.append("")
 
-        # Topic
         parts.append(f"RESEARCH TOPIC: {topic}")
         parts.append("")
 
-        # Research angles
         parts.append("RESEARCH ANGLES COVERED:")
         for st in subtasks:
             parts.append(
@@ -256,7 +166,6 @@ class WriterAgent:
             )
         parts.append("")
 
-        # Themes
         themes = analysis.get("themes", [])
         parts.append("MAJOR THEMES IDENTIFIED:")
         if themes:
@@ -274,13 +183,11 @@ class WriterAgent:
                         parts.append(f"  Sources: {', '.join(sources)}")
                     parts.append("")
                 else:
-                    # Simple string theme (from AnalysisIterationOutput)
                     parts.append(f"  - {theme}")
         else:
             parts.append("  (No themes identified)")
         parts.append("")
 
-        # Contradictions
         contradictions = analysis.get("contradictions", [])
         parts.append("CONTRADICTIONS FOUND:")
         if contradictions:
@@ -298,14 +205,12 @@ class WriterAgent:
             parts.append("  None identified")
         parts.append("")
 
-        # Key facts
         key_facts = analysis.get("key_facts", [])
         parts.append("OVERALL KEY FACTS:")
         for fact in key_facts[:10]:
             parts.append(f"  - {fact}")
         parts.append("")
 
-        # Metadata
         parts.append(
             f"CONFIDENCE SCORE: {analysis.get('confidence_score', 'N/A')}"
         )
@@ -318,7 +223,6 @@ class WriterAgent:
         )
         parts.append("")
 
-        # Citations
         parts.append("NUMBERED CITATIONS:")
         for citation in citations:
             parts.append(f"  {citation}")
@@ -328,19 +232,8 @@ class WriterAgent:
 
         return "\n".join(parts)
 
-    # ── citation formatting ───────────────────────────────────────────────
-
     def _format_citations(self, search_results: list[dict[str, Any]]) -> list[str]:
-        """Build a deduplicated, numbered citation list from search results.
-
-        Deduplicates by URL so the same source is not listed twice.
-
-        Args:
-            search_results: List of SearchResult dicts.
-
-        Returns:
-            A list of strings like ``["1. Title — URL", ...]``.
-        """
+        """Build a deduplicated, numbered citation list from search results."""
         seen_urls: set[str] = set()
         citations: list[str] = []
 
@@ -354,69 +247,32 @@ class WriterAgent:
 
         return citations
 
-    # ── markdown extraction helpers ───────────────────────────────────────
-
     def _extract_title(self, markdown: str) -> str:
-        """Extract the report title from the first ``#`` heading in the markdown.
-
-        Looks for a line starting with ``# `` (single hash, not ``##``).
-
-        Args:
-            markdown: The full markdown report string.
-
-        Returns:
-            The title string, or ``"Research Report"`` as a fallback.
-        """
+        """Extract the report title from the first ``#`` heading."""
         match = re.search(r"^# (.+)$", markdown, re.MULTILINE)
         if match:
             return match.group(1).strip()
         return "Research Report"
 
     def _extract_executive_summary(self, markdown: str) -> str:
-        """Extract the first paragraph after the ``## Executive Summary`` heading.
-
-        Finds the ``## Executive Summary`` heading and returns the text between
-        it and the next ``##`` heading (or end of document), taking the first
-        non-empty paragraph.
-
-        Args:
-            markdown: The full markdown report string.
-
-        Returns:
-            The executive summary paragraph, or ``""`` if not found.
-        """
+        """Extract the first paragraph after ``## Executive Summary``."""
         pattern = r"## Executive Summary\s*\n(.*?)(?=\n## |\Z)"
         match = re.search(pattern, markdown, re.DOTALL)
         if not match:
             return ""
 
         section_text = match.group(1).strip()
-        # Return first non-empty paragraph
         paragraphs = [p.strip() for p in section_text.split("\n\n") if p.strip()]
         return paragraphs[0] if paragraphs else ""
 
     def _strip_markdown_fences(self, text: str) -> str:
-        """Remove accidental markdown code fences from LLM output.
-
-        Some LLMs wrap their output in backtick blocks despite instructions
-        not to.  This strips leading/trailing fences.
-
-        Args:
-            text: Raw LLM output text.
-
-        Returns:
-            Text with backtick fences removed.
-        """
+        """Remove accidental markdown code fences that some LLMs add despite instructions."""
         if text.startswith("```"):
             text = text.split("\n", 1)[-1]
         if text.endswith("```"):
             text = text.rsplit("```", 1)[0]
         return text.strip()
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Standalone smoke-test
-# ═══════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     mock_analysis = {
