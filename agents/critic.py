@@ -1,5 +1,23 @@
 """Critic agent that reviews and scores draft reports for quality and accuracy
 using a single LLM call against a structured rubric.
+
+Critic vs Judge — two different roles:
+  Critic is an INTERNAL quality gate that runs inside the pipeline.
+  It scores on structure, citations, coherence, and readability (0-1 scale).
+  If quality_score < 0.70, it triggers a Writer revision with feedback_notes.
+  The Critic is part of the pipeline's self-improvement loop.
+
+  Judge (evaluation/judge.py) is an EXTERNAL evaluator that runs separately
+  during benchmarks.  It scores on research depth, source diversity, topic
+  coverage (0-10 scale).  The Judge never affects pipeline execution.
+
+  These are orthogonal: Critic scored 0.85 on reports that Judge scored 7.5.
+  Critic catches format/structure issues; Judge catches depth/coverage issues.
+
+Temperature: 0.2
+  Low temperature produces consistent, reproducible scores.  Higher values
+  cause score variance that makes the revision loop unpredictable —
+  the same report might pass on one call and fail on the next.
 """
 
 from __future__ import annotations

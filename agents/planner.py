@@ -1,5 +1,19 @@
 """Planner agent that decomposes research topics into subtasks via a ReAct loop
 with self-assessed coverage quality.
+
+Why ReAct here (and not single-call):
+  The Planner must evaluate whether its subtasks cover the topic adequately.
+  A single LLM call produces subtasks but cannot self-assess gaps.  The ReAct
+  loop adds a coverage_score + coverage_gaps evaluation after each pass.
+  If coverage < 0.70, the gaps are fed back for refinement.  In practice,
+  most topics pass on iteration 1, but 2-3 topics per benchmark needed a
+  second pass to catch blind spots (e.g. "prevention" missing from a
+  healthcare topic that only covered "treatment").
+
+Temperature: 0.4
+  Balances creativity (diverse subtask angles) with consistency (valid JSON).
+  Lower (0.1-0.2) produces near-identical subtasks across runs.
+  Higher (0.7+) breaks JSON formatting too often for reliable parsing.
 """
 
 from __future__ import annotations

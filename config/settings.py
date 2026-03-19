@@ -84,6 +84,9 @@ PLANNING_QUALITY_THRESHOLD: float = float(
 # Storage
 SQLITE_DB_PATH: str = os.getenv("SQLITE_DB_PATH", "data/newsforge_checkpoints.db")
 
+# API Authentication — optional (empty = disabled, set value = required)
+API_KEY: str = os.getenv("API_KEY", "")
+
 # AWS — optional (Publisher Agent uses S3 + DynamoDB when all vars are set)
 AWS_ACCESS_KEY_ID: str = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SECRET_ACCESS_KEY", "")

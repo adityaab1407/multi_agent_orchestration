@@ -2,6 +2,27 @@
 
 Pipeline: planner → search → scraper → analysis → writer → critic
           (critic ↔ writer revision loop) → human_review → publisher
+
+Model Routing (Two-Pool Strategy)
+----------------------------------
+All agents use models configured in config/settings.py:
+  Pool A (Scout 17B, 30K TPM): Planner, Analysis, Critic
+  Pool B (Llama 8B, 6K TPM): Writer, Judge
+Each pool has independent Groq rate limits, preventing
+sequential agents from colliding on TPM budgets.
+
+Checkpointing
+-------------
+SQLite checkpointer persists state after every node.
+If the pipeline crashes mid-run (rate limits, network),
+it resumes from the last successful node on next invoke.
+thread_id = research_id = resume key.
+
+Human-in-the-Loop
+-----------------
+human_review_node calls interrupt() which persists state
+and suspends execution. The caller resumes with
+Command(resume={"decision": "approve"|"reject"}).
 """
 
 import sys
@@ -498,6 +519,9 @@ def _critic_router(state: NewsForgeState) -> str:
     """Decide whether the report passes or needs another revision.
 
     Returns "done" (→ human review) or "revise" (→ writer for another pass).
+    This conditional edge creates the revision cycle in the graph —
+    the reason LangGraph is used instead of linear LangChain chains.
+    MAX_REVISIONS (2) caps the loop to prevent infinite revision.
     """
     critic_feedback = state.get("critic_feedback")
     revision_count = state.get("revision_count", 0)
@@ -569,6 +593,9 @@ def build_pipeline():
     graph.add_edge("publisher_node", END)
     graph.set_entry_point("planner_node")
 
+    # SQLite checkpointer: persists full state after every node.
+    # Enables crash recovery (resume from last node) and HITL
+    # (interrupt() writes state, Command(resume=...) reads it back).
     checkpointer = get_checkpointer()
     return graph.compile(checkpointer=checkpointer)
 

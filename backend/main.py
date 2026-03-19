@@ -36,9 +36,12 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security.api_key import APIKeyHeader
 from langgraph.types import Command
+
+from config.settings import API_KEY
 
 from backend.schemas import (
     AgentStatus,
@@ -58,6 +61,21 @@ from orchestrator.state import NewsForgeState
 # ── In-memory run tracker ────────────────────────────────────────────────
 # Keys: research_id → dict with status, result, thread, error, etc.
 active_runs: dict[str, dict[str, Any]] = {}
+
+# ── Optional API key authentication ─────────────────────────────────────
+# If API_KEY is set in .env, all mutating endpoints require X-API-Key header.
+# If API_KEY is empty, authentication is disabled (development mode).
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def verify_api_key(
+    api_key: str | None = Security(_api_key_header),
+) -> None:
+    """Validate the API key if authentication is enabled."""
+    if not API_KEY:
+        return  # Auth disabled — dev mode
+    if api_key != API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing API key")
 
 
 @asynccontextmanager
@@ -154,7 +172,10 @@ def _run_pipeline_background(
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.post("/research", response_model=ResearchStartResponse)
-async def run_research(request: ResearchRequest) -> ResearchStartResponse:
+async def run_research(
+    request: ResearchRequest,
+    _: None = Depends(verify_api_key),
+) -> ResearchStartResponse:
     """Start the full NewsForge research pipeline for a given topic.
 
     Returns immediately with a ``research_id`` and ``status="running"``.
@@ -215,7 +236,10 @@ async def run_research(request: ResearchRequest) -> ResearchStartResponse:
 
 
 @app.post("/research/{research_id}/approve", response_model=ResearchResponse)
-async def approve_research(research_id: str) -> ResearchResponse:
+async def approve_research(
+    research_id: str,
+    _: None = Depends(verify_api_key),
+) -> ResearchResponse:
     """Resume a paused pipeline with human approval.
 
     The pipeline continues from the ``human_review_node`` interrupt,
@@ -255,7 +279,10 @@ async def approve_research(research_id: str) -> ResearchResponse:
 
 
 @app.post("/research/{research_id}/reject", response_model=ResearchResponse)
-async def reject_research(research_id: str) -> ResearchResponse:
+async def reject_research(
+    research_id: str,
+    _: None = Depends(verify_api_key),
+) -> ResearchResponse:
     """Resume a paused pipeline with human rejection.
 
     The pipeline ends without publishing.  No report is saved.

@@ -1,13 +1,27 @@
 """LLM-as-judge evaluator for NewsForge benchmark.
 
-Uses llama-3.1-8b-instant by default for efficiency.
+LLM-as-Judge Pattern:
+  An independent LLM evaluates pipeline output against explicit rubric
+  criteria.  This is standard practice for evaluating generative AI systems
+  where ground-truth answers don't exist (unlike classification tasks).
+
+  The judge scores on 5 dimensions (0-10 each): research_depth,
+  source_diversity, topic_coverage, factual_coherence, report_quality.
+  Overall score = average of dimensions.  Pass threshold: 6.0/10.
+
+Why separate from Critic:
+  The Critic is an internal quality gate — it runs inside the pipeline and
+  can trigger revisions.  The Judge is external — it runs after the pipeline
+  completes, during benchmarks only.  They measure different things:
+  Critic catches structural/format issues (coherence, citations).
+  Judge catches research quality issues (depth, coverage, diversity).
+  Combining them into one model would conflate internal and external quality.
+
+Uses llama-3.1-8b-instant (Pool B) by default for efficiency.
 Override with GROQ_JUDGE_MODEL env var.
 
-Note on rate limits: if running full 10-topic benchmark,
-the judge adds ~10 additional LLM calls on top of the
-~100 pipeline calls. Use DELAY_BETWEEN_TOPICS in
-benchmark_runner.py to avoid hitting Groq free tier limits.
-Recommended: run benchmark in batches of 3 topics.
+Note on rate limits: the judge adds ~10 LLM calls on top of the
+~100 pipeline calls per benchmark.  Recommended: run in batches of 3 topics.
 """
 
 import json

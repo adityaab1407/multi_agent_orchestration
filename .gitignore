@@ -20,7 +20,11 @@ env/
 !.env.example
 
 # ── Data / runtime ────────────────────────────────────────────────────────
-data/
+data/reports/
+data/benchmark_results/
+data/newsforge_checkpoints.db
+data/newsforge_checkpoints.db-wal
+data/newsforge_checkpoints.db-shm
 *.db
 *.sqlite
 outputs/

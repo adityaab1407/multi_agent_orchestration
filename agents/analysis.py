@@ -1,6 +1,18 @@
 """Analysis agent that extracts themes, facts, and contradictions from scraped content.
 
 Uses a ReAct loop: ACT (call LLM) -> THINK (parse/validate) -> OBSERVE (check confidence).
+
+Pool A assignment (Scout 17B, 30K TPM):
+  Analysis prompts include the full scraped corpus (~6500 tokens per iteration).
+  Pool B's 6K TPM limit would be exceeded on the first call.  Scout's 30K TPM
+  accommodates this with headroom for the Planner and Critic in the same pool.
+
+8K corpus limit (max_content_chars = 8000):
+  Llama 4 Scout emits binary/garbage responses when the input prompt contains
+  mixed-encoding content from academic sources (arxiv, pubmed).  Capping at 8K
+  chars (~2K tokens) keeps the input within the model's reliable processing range.
+  This limit is per-iteration — across 2-3 ReAct iterations, the agent can
+  process up to ~24K chars of source material by focusing on different articles.
 """
 
 from __future__ import annotations

@@ -1,4 +1,24 @@
-"""Shared state schema for the NewsForge 7-agent pipeline."""
+"""Shared state schema for the NewsForge 7-agent pipeline.
+
+State Design Philosophy
+-----------------------
+This TypedDict is the single source of truth for all data flowing through
+the pipeline.  It was designed for all 7 agents *before* any agent code
+was written, so every field is an explicit contract between a producer
+and a consumer.
+
+Two field styles coexist:
+
+  Annotated[list, operator.add]  — ACCUMULATING fields.
+      Returning {"subtasks": [new]} *appends* to the existing list.
+      Used for subtasks, search_results, scraped_content, errors
+      because multiple nodes contribute to these collections.
+
+  Optional[T]  — REPLACED fields.
+      Returning {"draft_report": new_text} *overwrites* the previous value.
+      Used for analysis, draft_report, critic_feedback, etc. where only
+      the latest value matters (e.g. Writer revisions replace the old draft).
+"""
 
 import operator
 from typing import Annotated, Optional
@@ -52,38 +72,43 @@ class NewsForgeState(TypedDict):
     Fields that get REPLACED use plain types.
     """
 
-    # Input (set once at pipeline entry)
+    # ── Input (set once at pipeline entry) ──────────────────────────────
     research_id: str
     topic: str
 
-    # Planner Agent output
+    # ── Planner → Search ─────────────────────────────────────────────────
+    # Planner writes, Search reads to build per-subtask queries
     subtasks: Annotated[list[Subtask], operator.add]
 
-    # Search Agent output
+    # ── Search → Scraper ─────────────────────────────────────────────────
+    # Search writes, Scraper reads URLs to fetch
     search_results: Annotated[list[SearchResult], operator.add]
 
-    # Scraper Agent output
+    # ── Scraper → Analysis ───────────────────────────────────────────────
+    # Scraper writes, Analysis reads raw text corpus
     scraped_content: Annotated[list[ScrapedContent], operator.add]
 
-    # Analysis Agent output
+    # ── Analysis → Writer ────────────────────────────────────────────────
+    # Analysis writes, Writer reads themes/facts to compose report
     analysis: Optional[AnalysisOutput]
 
-    # Writer Agent output
+    # ── Writer → Critic (replaced on each revision) ─────────────────────
     draft_report: Optional[str]
 
-    # Critic Agent output
+    # ── Critic → Writer (feedback loop) / Human Review ───────────────────
+    # Replaced each pass; revision_count tracks loop iterations
     critic_feedback: Optional[CriticFeedback]
     revision_count: int
 
-    # Human-in-the-Loop review
-    human_decision: Optional[str]
+    # ── Human-in-the-Loop → Publisher ────────────────────────────────────
+    human_decision: Optional[str]  # "approve" or "reject"
 
-    # Publisher Agent output
+    # ── Publisher output ─────────────────────────────────────────────────
     published_url: Optional[str]
     published_record_id: Optional[str]
 
-    # Pipeline metadata
+    # ── Pipeline metadata (read by all, written by graph runner) ─────────
     pipeline_status: str
-    errors: Annotated[list[str], operator.add]
+    errors: Annotated[list[str], operator.add]  # Accumulated across all nodes
     created_at: str
     completed_at: Optional[str]
