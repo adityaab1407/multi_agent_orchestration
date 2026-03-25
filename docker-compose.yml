@@ -9,13 +9,13 @@ services:
       dockerfile: Dockerfile.backend
     container_name: newsforge-backend
     ports:
-      - "8080:8080"
+      - "8082:8082"
     env_file:
       - .env
     volumes:
       - ./data:/app/data
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8082/health')"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -27,9 +27,9 @@ services:
       dockerfile: Dockerfile.frontend
     container_name: newsforge-frontend
     ports:
-      - "8501:8501"
+      - "8502:8502"
     environment:
-      - BACKEND_URL=http://backend:8080
+      - BACKEND_URL=http://backend:8082
     depends_on:
       backend:
         condition: service_healthy

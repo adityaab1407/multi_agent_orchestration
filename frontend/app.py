@@ -122,6 +122,7 @@ _DEFAULTS: dict[str, Any] = {
     "pipeline_start_time": None,
     "current_topic": None,
     "show_evaluations": False,
+    "hitl_missed": False,
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -135,15 +136,34 @@ st.markdown("""
 <style>
 /* ── Base ──────────────────────────────────── */
 .stApp { background-color: #0a0e14; }
-.block-container { max-width: 1280px; padding-top: 1.5rem; }
+.block-container { max-width: 1280px; padding-top: 2rem; }
 section[data-testid="stSidebar"] { background-color: #0d1117; }
-section[data-testid="stSidebar"] .block-container { padding-top: 1rem; }
+section[data-testid="stSidebar"] .block-container { padding-top: 1.25rem; }
+
+/* ── Global font size floor (exclude headings + divs) ── */
+.stApp p, .stApp span, .stApp label, .stApp li {
+    font-size: 1rem; }
 
 /* ── Header ────────────────────────────────── */
-.nf-header { margin-bottom: 0.5rem; }
-.nf-header h1 { font-size: 2rem; font-weight: 800; color: #e6edf3;
-    margin: 0; letter-spacing: -0.5px; }
-.nf-header .tagline { color: #7d8590; font-size: 0.92rem; margin-top: 2px; }
+/* .nf-title uses a CSS class (not inline style) so Streamlit's sanitizer
+   cannot strip the !important declarations. This is the only reliable way
+   to override Streamlit's own h1/heading stylesheet rules. */
+.nf-title {
+    font-size: 3.8rem !important;
+    font-weight: 800 !important;
+    color: #e6edf3 !important;
+    letter-spacing: -2px !important;
+    line-height: 1.1 !important;
+    margin: 0 0 10px 0 !important;
+    padding: 0 !important;
+    display: block !important;
+    text-align: center !important;
+}
+.nf-header { margin-bottom: 1.5rem; text-align: center; }
+.nf-header .tagline { color: #8b949e; font-size: 1.05rem; margin-top: 6px;
+    line-height: 1.5; }
+.nf-header .subtitle { color: #7d8590; font-size: 0.92rem; margin-top: 6px;
+    font-style: italic; }
 .nf-status-dot { display: inline-block; width: 8px; height: 8px;
     border-radius: 50%; margin-right: 6px; vertical-align: middle; }
 .nf-status-healthy { background: #22c55e; box-shadow: 0 0 6px #22c55e88; }
@@ -153,18 +173,18 @@ section[data-testid="stSidebar"] .block-container { padding-top: 1rem; }
 
 /* ── Pipeline cards ────────────────────────── */
 .pipeline-row { display: flex; align-items: stretch; gap: 0;
-    overflow-x: auto; padding: 12px 0; }
-.pipe-card { flex: 1 1 0; min-width: 110px; max-width: 160px;
-    border-radius: 10px; padding: 14px 10px; text-align: center;
+    overflow-x: auto; padding: 16px 0; }
+.pipe-card { flex: 1 1 0; min-width: 120px; max-width: 170px;
+    border-radius: 10px; padding: 16px 12px; text-align: center;
     position: relative; transition: all 0.3s ease; }
-.pipe-card .p-name { font-weight: 700; font-size: 0.78rem; color: #e6edf3;
-    margin: 4px 0 2px 0; line-height: 1.2; }
-.pipe-card .p-desc { font-size: 0.65rem; color: #7d8590; margin: 0;
-    line-height: 1.3; }
-.pipe-card .p-metric { font-size: 0.72rem; color: #c9d1d9; margin-top: 8px;
-    line-height: 1.3; min-height: 1.4em; }
+.pipe-card .p-name { font-weight: 700; font-size: 0.92rem; color: #e6edf3;
+    margin: 6px 0 4px 0; line-height: 1.2; }
+.pipe-card .p-desc { font-size: 0.78rem; color: #7d8590; margin: 0;
+    line-height: 1.4; }
+.pipe-card .p-metric { font-size: 0.82rem; color: #c9d1d9; margin-top: 10px;
+    line-height: 1.4; min-height: 1.5em; }
 .pipe-card .p-metric b { color: #fff; }
-.pipe-card .p-time { font-size: 0.62rem; color: #484f58; margin-top: 4px; }
+.pipe-card .p-time { font-size: 0.72rem; color: #484f58; margin-top: 5px; }
 
 /* Card states */
 .pc-waiting  { background: #161b22; border: 1.5px solid #21262d; }
@@ -204,29 +224,29 @@ section[data-testid="stSidebar"] .block-container { padding-top: 1rem; }
 
 /* ── Metric boxes ──────────────────────────── */
 .m-box { background: #161b22; border: 1px solid #21262d; border-radius: 10px;
-    padding: 16px 12px; text-align: center; }
-.m-box .m-num { font-size: 1.7rem; font-weight: 700; color: #e6edf3;
+    padding: 18px 14px; text-align: center; }
+.m-box .m-num { font-size: 1.9rem; font-weight: 700; color: #e6edf3;
     margin: 0; line-height: 1.2; }
-.m-box .m-label { font-size: 0.78rem; color: #7d8590; margin: 4px 0 0 0; }
+.m-box .m-label { font-size: 0.88rem; color: #7d8590; margin: 6px 0 0 0; }
 
 /* ── Status bar ────────────────────────────── */
 .status-bar { background: #161b22; border: 1px solid #21262d;
-    border-radius: 8px; padding: 10px 16px; margin: 8px 0 12px 0;
-    font-size: 0.82rem; color: #8b949e; }
+    border-radius: 8px; padding: 12px 18px; margin: 10px 0 14px 0;
+    font-size: 0.95rem; color: #8b949e; line-height: 1.6; }
 .status-bar b { color: #e6edf3; }
 
 /* ── HITL panel ────────────────────────────── */
 .hitl-panel { background: linear-gradient(135deg, #2d2305 0%, #161b22 100%);
     border: 2px solid #d29922; border-radius: 14px; padding: 28px;
     margin: 20px 0; }
-.hitl-panel h2 { color: #d29922; margin: 0 0 4px 0; font-size: 1.3rem; }
-.hitl-panel .sub { color: #8b949e; font-size: 0.88rem; margin-bottom: 16px; }
+.hitl-panel h2 { color: #d29922; margin: 0 0 4px 0; font-size: 1.5rem; }
+.hitl-panel .sub { color: #8b949e; font-size: 1rem; margin-bottom: 16px; }
 
 /* ── Report section ────────────────────────── */
-.report-meta { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 16px 0; }
+.report-meta { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 18px 0; }
 .r-badge { display: inline-flex; align-items: center; gap: 5px;
     background: #161b22; border: 1px solid #21262d; border-radius: 6px;
-    padding: 5px 12px; font-size: 0.8rem; color: #8b949e; }
+    padding: 6px 14px; font-size: 0.9rem; color: #8b949e; }
 .r-badge .val { font-weight: 700; color: #e6edf3; }
 
 /* ── Quality gauge ─────────────────────────── */
@@ -239,12 +259,12 @@ section[data-testid="stSidebar"] .block-container { padding-top: 1rem; }
 .gauge-label { font-size: 0.7rem; color: #7d8590; margin-top: 2px; }
 
 /* ── Theme cards ───────────────────────────── */
-.theme-card { background: #161b22; border-radius: 8px; padding: 14px;
-    margin-bottom: 8px; border-left: 3px solid #1f6feb; }
-.theme-card .t-name { font-weight: 600; color: #e6edf3; font-size: 0.9rem;
-    margin: 0 0 6px 0; }
-.theme-card .t-facts { color: #8b949e; font-size: 0.8rem; margin: 0;
-    line-height: 1.5; }
+.theme-card { background: #161b22; border-radius: 8px; padding: 16px;
+    margin-bottom: 10px; border-left: 3px solid #1f6feb; }
+.theme-card .t-name { font-weight: 600; color: #e6edf3; font-size: 1rem;
+    margin: 0 0 8px 0; }
+.theme-card .t-facts { color: #8b949e; font-size: 0.9rem; margin: 0;
+    line-height: 1.6; }
 
 /* ── Source credibility badges ─────────────── */
 .cred-academic { color: #3fb950; }
@@ -270,11 +290,11 @@ section[data-testid="stSidebar"] .block-container { padding-top: 1rem; }
 
 /* ── Sidebar ───────────────────────────────── */
 .sb-section { background: #161b22; border: 1px solid #21262d;
-    border-radius: 8px; padding: 12px; margin-bottom: 12px; }
-.sb-title { font-size: 0.82rem; font-weight: 700; color: #e6edf3;
-    margin: 0 0 8px 0; }
+    border-radius: 8px; padding: 14px; margin-bottom: 14px; }
+.sb-title { font-size: 0.88rem; font-weight: 700; color: #e6edf3;
+    margin: 0 0 10px 0; letter-spacing: 0.3px; }
 .sb-row { display: flex; justify-content: space-between; align-items: center;
-    padding: 3px 0; font-size: 0.78rem; }
+    padding: 4px 0; font-size: 0.84rem; }
 .sb-key { color: #7d8590; }
 .sb-val { color: #c9d1d9; font-weight: 600; }
 .sb-ok  { color: #3fb950; }
@@ -295,23 +315,25 @@ section[data-testid="stSidebar"] .block-container { padding-top: 1rem; }
 
 /* ── Eval panel ───────────────────────────── */
 .eval-panel-header { background: #161b22; border: 1px solid #21262d;
-    border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; }
-.eval-panel-header .ep-title { font-size: 0.92rem; font-weight: 700;
-    color: #e6edf3; margin: 0 0 6px 0; }
-.eval-panel-header .ep-desc { font-size: 0.78rem; color: #8b949e;
-    line-height: 1.5; margin: 0; }
-.eval-divider { border: 0; border-top: 1px solid #21262d; margin: 10px 0; }
+    border-radius: 10px; padding: 16px 18px; margin-bottom: 14px; }
+.eval-panel-header .ep-title { font-size: 1rem; font-weight: 700;
+    color: #e6edf3; margin: 0 0 8px 0; }
+.eval-panel-header .ep-desc { font-size: 0.85rem; color: #8b949e;
+    line-height: 1.6; margin: 0; }
+.eval-divider { border: 0; border-top: 1px solid #21262d; margin: 12px 0; }
 
 /* ── Right eval column — sticky + scrollable ─ */
-div[data-testid="stColumn"]:last-child .eval-sticky-wrap {
-    position: sticky; top: 1rem; max-height: 95vh;
-    overflow-y: auto; padding-right: 4px; }
-div[data-testid="stColumn"]:last-child .eval-sticky-wrap::-webkit-scrollbar {
-    width: 4px; }
-div[data-testid="stColumn"]:last-child .eval-sticky-wrap::-webkit-scrollbar-thumb {
+.eval-sticky-wrap {
+    position: sticky;
+    top: 1rem;
+    max-height: 88vh;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-right: 4px; }
+.eval-sticky-wrap::-webkit-scrollbar { width: 4px; }
+.eval-sticky-wrap::-webkit-scrollbar-thumb {
     background: #30363d; border-radius: 2px; }
-div[data-testid="stColumn"]:last-child .eval-sticky-wrap::-webkit-scrollbar-track {
-    background: transparent; }
+.eval-sticky-wrap::-webkit-scrollbar-track { background: transparent; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -475,7 +497,18 @@ def get_loading_message(elapsed: float) -> str:
 
 
 def _sim_agent_state(elapsed: float, agent_key: str) -> str:
-    """Determine simulated state based on elapsed time."""
+    """Determine simulated state based on elapsed time.
+
+    Publisher is never shown during simulation — it only runs after human
+    approval which hasn't happened yet.  Human review is shown as 'running'
+    once its time slot starts but never as 'complete' (the interrupt fires
+    there, so the sim must freeze and wait for the real poll result).
+    """
+    if agent_key == "publisher":
+        return "waiting"  # not approved yet
+    if agent_key == "human_review":
+        start, _ = AGENT_TIMINGS.get("human_review", (72, 78))
+        return "running" if elapsed >= start else "waiting"
     start, end = AGENT_TIMINGS.get(agent_key, (999, 999))
     if elapsed < start:
         return "waiting"
@@ -484,9 +517,25 @@ def _sim_agent_state(elapsed: float, agent_key: str) -> str:
     return "complete"
 
 
+# Agents that run before the human_review interrupt point
+_PRE_HITL_AGENTS = {"planner", "search", "scraper", "analysis", "writer", "critic"}
+
+
 def _get_real_agent_state(agent_key: str, results: dict) -> str:
     """Determine actual agent state from results."""
     status = results.get("status", "")
+
+    # When paused at HITL the partial results dict may lack individual agent
+    # fields (subtasks, draft_report, etc.) but all 6 preceding agents DID
+    # complete — mark them correctly so the pipeline viz looks right.
+    if status == "awaiting_approval":
+        if agent_key in _PRE_HITL_AGENTS:
+            return "complete"
+        if agent_key == "human_review":
+            return "hitl"
+        if agent_key == "publisher":
+            return "waiting"
+
     checks = {
         "planner":      lambda r: len(r.get("subtasks", [])) > 0,
         "search":       lambda r: len(r.get("search_results", [])) > 0,
@@ -919,105 +968,14 @@ def render_benchmark_panel():
                 unsafe_allow_html=True,
             )
 
-    # ── Section F — Known Limitation ─────────────────────────────────────
-    with st.expander("Known Limitation", expanded=False):
-        st.markdown(
-            '<div style="font-size:0.75rem;color:#8b949e;line-height:1.6;">'
-            'Analysis agent had binary encoding failures on some benchmark '
-            'topics when processing PDF/academic content. The Writer + Critic '
-            'loop compensated — all topics still passed the judge threshold.'
-            '<br><br>'
-            '<b style="color:#c9d1d9;">Root cause:</b> Llama 4 Scout returns '
-            'compressed binary data on prompts containing mixed-encoding content.'
-            '<br>'
-            '<b style="color:#c9d1d9;">Fix:</b> 8K char corpus limit + binary '
-            'response detection added to Analysis agent.</div>',
-            unsafe_allow_html=True,
-        )
-
-    # ── Section G — Evaluation methodology ───────────────────────────────
-    with st.expander("Evaluation Methodology", expanded=False):
-        st.markdown(
-            '<div style="font-size:0.75rem;color:#8b949e;line-height:1.6;">'
-            '<b style="color:#c9d1d9;">Judge model:</b> llama-3.1-8b-instant '
-            '(temp 0.1)<br>'
-            '<b style="color:#c9d1d9;">Dimensions:</b> Research Depth, Source '
-            'Diversity, Topic Coverage, Factual Coherence, Report Quality<br>'
-            '<b style="color:#c9d1d9;">Pass threshold:</b> 6.0/10<br>'
-            '<b style="color:#c9d1d9;">Run separately</b> from live pipeline.'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-
-    # ── Section H — Report Comparison ────────────────────────────────────
-    render_report_comparison()
-
-
-def render_report_comparison():
-    """Render report comparison inside the sidebar evaluation panel."""
-    report_metas_all = load_report_metadata()
-    real_reports = [m for m in report_metas_all if m.get("word_count", 0) > 200]
-
-    if len(real_reports) < 2:
-        return
-
-    st.markdown('<hr class="eval-divider">', unsafe_allow_html=True)
-    st.markdown(
-        '<div style="font-size:0.82rem;font-weight:700;color:#e6edf3;'
-        'margin:4px 0 8px 0;">Report Comparison</div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        '<span style="font-size:0.72rem;color:#7d8590;">'
-        'Compare two reports side by side</span>',
-        unsafe_allow_html=True,
-    )
-
-    report_labels = [
-        f"{m.get('topic', 'Unknown')[:30]} ({m.get('quality_score', 0):.2f})"
-        for m in real_reports[:20]
-    ]
-
-    sel1 = st.selectbox("Report A", report_labels, index=0, key="cmp_a")
-    sel2 = st.selectbox(
-        "Report B", report_labels,
-        index=min(1, len(report_labels) - 1), key="cmp_b",
-    )
-
-    if sel1 and sel2:
-        idx1 = report_labels.index(sel1)
-        idx2 = report_labels.index(sel2)
-
-        for meta, label in [(real_reports[idx1], "A"), (real_reports[idx2], "B")]:
-            qs = meta.get("quality_score", 0)
-            st.markdown(
-                f'<div class="m-box" style="margin-bottom:8px;">'
-                f'<p class="m-label">Report {label}</p>'
-                f'<p style="color:#c9d1d9;font-size:0.78rem;margin:4px 0;">'
-                f'{meta.get("topic", "Unknown")[:40]}</p>'
-                f'<p class="m-num" style="color:{score_color(qs)};font-size:1.2rem;">'
-                f'{qs:.2f}</p>'
-                f'<p class="m-label">{meta.get("word_count", 0):,} words</p>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-
-            report_file = REPORTS_DIR / meta.get("report_file", "")
-            if report_file.exists():
-                content = report_file.read_text(encoding="utf-8")
-                with st.expander(f"Report {label} Preview", expanded=False):
-                    st.markdown(
-                        content[:2000] + ("\n\n*... truncated*" if len(content) > 2000 else "")
-                    )
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SIDEBAR — System Health
 # ═══════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown(
-        '<div class="sb-title" style="font-size:1rem;margin-bottom:12px;">'
-        'NewsForge</div>',
+        '<div class="sb-title" style="font-size:1.1rem;margin-bottom:16px;'
+        'letter-spacing:0.5px;">Control Panel</div>',
         unsafe_allow_html=True,
     )
 
@@ -1161,13 +1119,16 @@ _main_col.__enter__()
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION 1 — Header
 # ═══════════════════════════════════════════════════════════════════════════
-health_dot = "nf-status-healthy" if is_healthy else "nf-status-down"
-st.markdown(f'''
-<div class="nf-header">
-    <h1><span class="nf-status-dot {health_dot}"></span>NewsForge</h1>
+st.markdown('''
+<div class="nf-header" style="padding: 1.5rem 0 1rem 0;">
+    <span class="nf-title">NewsForge</span>
     <div class="tagline">
-        7-agent autonomous research pipeline &nbsp;&middot;&nbsp;
-        LangGraph &middot; Groq &middot; Tavily &middot; Langfuse
+        Autonomous multi-agent research pipeline &mdash; from query to
+        publication-ready report in under 2 minutes.
+    </div>
+    <div class="subtitle">
+        Planner &rarr; Search &rarr; Scraper &rarr; Analysis &rarr; Writer &rarr; Critic &rarr; Publisher
+        &nbsp;&middot;&nbsp; LangGraph &middot; Groq &middot; Tavily &middot; Langfuse
     </div>
 </div>''', unsafe_allow_html=True)
 
@@ -1188,7 +1149,7 @@ col_input, col_run = st.columns([7, 1])
 with col_input:
     topic = st.text_input(
         "Research Topic",
-        placeholder="e.g. Impact of AI on healthcare, CRISPR breakthroughs, Semiconductor supply chain risks",
+        value="How is AI transforming drug discovery and clinical trials?",
         max_chars=500,
         label_visibility="collapsed",
         key="topic_input",
@@ -1222,6 +1183,7 @@ if run_clicked:
         st.session_state.awaiting_approval = False
         st.session_state.report_preview = None
         st.session_state.quality_score_preview = None
+        st.session_state.hitl_missed = False
         st.session_state.current_topic = topic.strip()
 
         # Add to history
@@ -1292,9 +1254,14 @@ if st.session_state.is_loading and st.session_state.research_id:
             st.rerun()
 
         elif poll_status_val == "complete":
-            # Pipeline completed without HITL pause (edge case)
+            # Pipeline finished — save full results so report/HITL summary renders
             st.session_state.is_loading = False
             st.session_state.elapsed_time = elapsed
+            st.session_state.results = status_data
+            # If the backend had a HITL step but we polled past it, surface
+            # the report_preview so the user knows it was auto-approved.
+            if status_data.get("report_preview") and not st.session_state.awaiting_approval:
+                st.session_state.hitl_missed = True
             st.rerun()
 
         elif poll_status_val == "failed":
@@ -1304,7 +1271,7 @@ if st.session_state.is_loading and st.session_state.research_id:
 
         else:
             # Still running — wait and poll again
-            time.sleep(2)
+            time.sleep(1)
             st.rerun()
 
     except requests.exceptions.ConnectionError:
@@ -1361,6 +1328,17 @@ if results and results.get("status") in ("complete", "rejected") and not st.sess
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION 4 — HITL Review Panel
 # ═══════════════════════════════════════════════════════════════════════════
+
+# Notify if HITL was polled past (race condition) so it's not silently lost
+if st.session_state.hitl_missed:
+    st.info(
+        "**Human review step completed automatically** — the pipeline finished "
+        "before the review prompt could be displayed. The report was auto-approved. "
+        "See the Research Report below.",
+        icon="ℹ️",
+    )
+    st.session_state.hitl_missed = False
+
 if st.session_state.awaiting_approval and results:
     research_id = st.session_state.research_id
     report_preview = results.get("report_preview") or ""
@@ -1824,32 +1802,27 @@ if results and (results.get("analysis") or results.get("search_results")):
                     )
 
                     rel_bar_pct = min(rel_score * 100, 100)
-                    st.markdown(f'''
-                    <div style="background:#161b22;border:1px solid #21262d;
-                        border-radius:8px;padding:10px;margin:4px 0;">
-                        <div style="display:flex;justify-content:space-between;align-items:flex-start;">
-                            <div style="flex:1;">
-                                <a href="{url}" target="_blank"
-                                    style="font-size:0.85rem;font-weight:600;color:#58a6ff;
-                                    text-decoration:none;">{sr.get("title", "Untitled")}</a>
-                                <div style="font-size:0.72rem;margin-top:3px;">
-                                    <span style="color:#7d8590;">{domain}</span>
-                                    <span style="margin:0 4px;color:#484f58;">&middot;</span>
-                                    <span class="{cred_cls}">{cred_icon} {cred_label}</span>
-                                    <span style="margin:0 4px;color:#484f58;">&middot;</span>
-                                    {scrape_badge}
-                                </div>
-                            </div>
-                            <div style="text-align:right;min-width:50px;">
-                                <span style="font-size:0.88rem;font-weight:700;color:{rel_color};">
-                                    {rel_score:.2f}</span>
-                            </div>
-                        </div>
-                        <div style="height:2px;background:#21262d;border-radius:1px;margin-top:6px;">
-                            <div style="height:100%;width:{rel_bar_pct}%;background:{rel_color};
-                                border-radius:1px;"></div>
-                        </div>
-                    </div>''', unsafe_allow_html=True)
+                    card_html = (
+                        f'<div style="background:#161b22;border:1px solid #21262d;'
+                        f'border-radius:8px;padding:10px;margin:4px 0;">'
+                        f'<div style="display:flex;justify-content:space-between;align-items:flex-start;">'
+                        f'<div style="flex:1;">'
+                        f'<a href="{url}" target="_blank" style="font-size:0.85rem;font-weight:600;'
+                        f'color:#58a6ff;text-decoration:none;">{sr.get("title", "Untitled")}</a>'
+                        f'<div style="font-size:0.72rem;margin-top:3px;">'
+                        f'<span style="color:#7d8590;">{domain}</span>'
+                        f'<span style="margin:0 4px;color:#484f58;">&middot;</span>'
+                        f'<span class="{cred_cls}">{cred_icon} {cred_label}</span>'
+                        f'<span style="margin:0 4px;color:#484f58;">&middot;</span>'
+                        f'{scrape_badge}</div></div>'
+                        f'<div style="text-align:right;min-width:50px;">'
+                        f'<span style="font-size:0.88rem;font-weight:700;color:{rel_color};">{rel_score:.2f}</span>'
+                        f'</div></div>'
+                        f'<div style="height:2px;background:#21262d;border-radius:1px;margin-top:6px;">'
+                        f'<div style="height:100%;width:{rel_bar_pct:.2f}%;background:{rel_color};'
+                        f'border-radius:1px;"></div></div></div>'
+                    )
+                    st.markdown(card_html, unsafe_allow_html=True)
         else:
             st.info("No search results available.")
 
